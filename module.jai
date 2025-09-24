@@ -61,8 +61,15 @@ See end of file for license information.
 */
 
 //version 2.4
-#import "Basic";
 #scope_module
+#import "Basic";
+bitops ::#import "Bit_Operations";
+
+// msf_bit_log :: inline (i: int) -> int { return 32 - __builtin_clzl(i); }
+msf_bit_log :: inline (i: int) -> int { return 1 + bitops.bit_scan_reverse(i);} //maybe bit_scan_forward == 32 - bit_scan_reverse?
+
+
+
 size_t :: s64;
 
 MsfGifResult :: struct {
@@ -108,7 +115,27 @@ MsfGifState :: struct { //internal use
 } ;
 
 
+offset_of :: ($T: Type, $member: string) -> int {
+    for type_info(T).members {
+        if it.name == member return it.offset_in_bytes;
+    }
+
+    assert(false, "Type '%' does not have member '%'", T, member);
+    return -1;
+}
 #scope_export
+
+main :: () {
+    width := 480;
+    height := 320;
+    centisecondsPerFrame := 5;
+    quality := 16;
+    handle := New(MsfGifState);
+
+    msf_gif_begin  (handle=handle, width = 32, height = 32);
+    msf_gif_frame(handle,null, centisecondsPerFrame, quality, width/4);
+    msf_gif_end(handle);
+}
 
 msf_gif_begin :: (handle: *MsfGifState, width: int, height: int) -> int {
     //profiler->MsfTimeFunc
@@ -135,22 +162,14 @@ msf_gif_begin :: (handle: *MsfGifState, width: int, height: int) -> int {
     // handle.lzwMem = (s16 *) MSF_GIF_MALLOC(handle.customAllocatorContext, lzwAllocSize);
     // handle.tlbMem = (u8 *) MSF_GIF_MALLOC(handle.customAllocatorContext, tlbAllocSize);
     // handle.usedMem = (u8 *) MSF_GIF_MALLOC(handle.customAllocatorContext, usedAllocSize);
-    // handle.previousFrame.pixels = (u32 *) MSF_GIF_MALLOC(handle.customAllocatorContext, handle.width * handle.height * sizeof(u32));
-    // handle.currentFrame.pixels = (u32 *) MSF_GIF_MALLOC(handle.customAllocatorContext, handle.width * handle.height * sizeof(u32));
+    // handle.previousFrame.pixels = (u32 *) MSF_GIF_MALLOC(handle.customAllocatorContext, handle.width * handle.height * size_of(u32));
+    // handle.currentFrame.pixels = (u32 *) MSF_GIF_MALLOC(handle.customAllocatorContext, handle.width * handle.height * size_of(u32));
     handle.previousFrame.pixels = cast(*u32) alloc(handle.width * handle.height * size_of(u32));
     handle.lzwMem               = cast(*s16) alloc(lzwAllocSize);
     handle.tlbMem               = cast(*u8)  alloc(tlbAllocSize);
     handle.usedMem              = cast(*u8)  alloc(usedAllocSize);
     handle.currentFrame.pixels  = cast(*u32) alloc(handle.width * handle.height * size_of(u32));
 
-    offset_of :: ($T: Type, $member: string) -> int {
-        for type_info(T).members {
-            if it.name == member return it.offset_in_bytes;
-        }
-
-        assert(false, "Type '%' does not have member '%'", T, member);
-        return -1;
-    }
 
     //setup header buffer header (lol)
     handle.listHead = cast(*MsfGifBuffer) alloc(#run offset_of(MsfGifBuffer, "data") + 32);
@@ -178,13 +197,339 @@ msf_gif_begin :: (handle: *MsfGifState, width: int, height: int) -> int {
 }
 
 
-main :: () {
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+/// Frame Cooking                                                                                                    ///
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-    handle := New(MsfGifState);
+// #if (defined (__SSE2__) || defined (_M_X64) || _M_IX86_FP == 2) && !defined(MSF_GIF_NO_SSE2)
+// #include <emmintrin.h>
+// #endif
 
-    msf_gif_begin  (handle=handle, width = 32, height = 32);
-    msf_gif_end(handle);
+msf_gif_alpha_threshold := 0;
+msf_gif_bgra_flag := 0;
+
+ msf_cook_frame :: (frame: *MsfCookedFrame, raw: *u8, used: *u8,
+                           width: int, height: int, pitch: int, depth: int)
+{
+    //for profiling ->  MsfTimeFunc
+    //bit depth for each channel
+    rdepthsArray: [17]int = int.[ 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 5, 5 ];
+    gdepthsArray: [17]int = int.[ 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 5, 5, 6 ];
+    bdepthsArray: [17]int = int.[ 0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 5 ];
+    //this extra level of indirection looks unnecessary but we need to explicitly decay the arrays to pointers
+    //in order to be able to swap them because of C's annoying not-quite-pointers, not-quite-value-types stack arrays.
+    rdepths := ifx msf_gif_bgra_flag then bdepthsArray else rdepthsArray;
+    gdepths := gdepthsArray;
+    bdepths := ifx msf_gif_bgra_flag then rdepthsArray else bdepthsArray;
+
+    ditherKernel: [16]int = int.[
+         0 << 12,  8 << 12,  2 << 12, 10 << 12,
+        12 << 12,  4 << 12, 14 << 12,  6 << 12,
+         3 << 12, 11 << 12,  1 << 12,  9 << 12,
+        15 << 12,  7 << 12, 13 << 12,  5 << 12,
+    ];
+
+    cooked := frame.pixels;
+    count := 0;
+    // MsfTimeLoop("do") do
+    while true
+    {
+    //@Check -> while (count >= 256 && --depth);
+        rbits:int = rdepths[depth];
+        gbits:int  = gdepths[depth];
+        bbits:int  = bdepths[depth];
+        paletteSize:int = (1 << (rbits + gbits + bbits)) + 1;
+        memset(used, 0, paletteSize * size_of(u8));
+
+        //TODO: document what this math does and why it's correct
+        //(jai author): Do not do it, its obvious.
+        rdiff:int = (1 << (8 - rbits)) - 1;
+        gdiff:int = (1 << (8 - gbits)) - 1;
+        bdiff:int = (1 << (8 - bbits)) - 1;
+        rmul := cast(s16) ((255.0 - rdiff) / 255.0 * 257); //@Investigate(roufrouf): short is used as s16 here
+        gmul := cast(s16) ((255.0 - gdiff) / 255.0 * 257); //@Investigate(roufrouf): short is used as s16 here
+        bmul := cast(s16) ((255.0 - bdiff) / 255.0 * 257); //@Investigate(roufrouf): short is used as s16 here
+
+        gmask:int = ((1 << gbits) - 1) << rbits;
+        bmask:int = ((1 << bbits) - 1) << rbits << gbits;
+
+        // MsfTimeLoop("cook")
+        for y: 0 .. height - 1 {
+            x := 0;
+
+            //TODO(roufrouf): make this simd in #asm blocks
+            // #if (defined (__SSE2__) || defined (_M_X64) || _M_IX86_FP == 2) && !defined(MSF_GIF_NO_SSE2)
+            //     __m128i k = _mm_loadu_si128((__m128i *) &ditherKernel[(y & 3) * 4]);
+            //     __m128i k2 = _mm_or_si128(_mm_srli_epi32(k, rbits), _mm_slli_epi32(_mm_srli_epi32(k, bbits), 16));
+            //     for (; x < width - 3; x += 4) {
+            //         u8 * pixels = &raw[y * pitch + x * 4];
+            //         __m128i p = _mm_loadu_si128((__m128i *) pixels);
+
+            //         __m128i rb = _mm_and_si128(p, _mm_set1_epi32(0x00FF00FF));
+            //         __m128i rb1 = _mm_mullo_epi16(rb, _mm_set_epi16(bmul, rmul, bmul, rmul, bmul, rmul, bmul, rmul));
+            //         __m128i rb2 = _mm_adds_epu16(rb1, k2);
+            //         __m128i r3 = _mm_srli_epi32(_mm_and_si128(rb2, _mm_set1_epi32(0x0000FFFF)), 16 - rbits);
+            //         __m128i b3 = _mm_and_si128(_mm_srli_epi32(rb2, 32 - rbits - gbits - bbits), _mm_set1_epi32(bmask));
+
+            //         __m128i g = _mm_and_si128(_mm_srli_epi32(p, 8), _mm_set1_epi32(0x000000FF));
+            //         __m128i g1 = _mm_mullo_epi16(g, _mm_set1_epi32(gmul));
+            //         __m128i g2 = _mm_adds_epu16(g1, _mm_srli_epi32(k, gbits));
+            //         __m128i g3 = _mm_and_si128(_mm_srli_epi32(g2, 16 - rbits - gbits), _mm_set1_epi32(gmask));
+
+            //         __m128i out = _mm_or_si128(_mm_or_si128(r3, g3), b3);
+
+            //         //mask in transparency based on threshold
+            //         //NOTE: we can theoretically do a sub instead of srli by doing an unsigned compare via bias
+            //         //      to maybe save a TINY amount of throughput? but lol who cares maybe I'll do it later -m
+            //         __m128i invAlphaMask = _mm_cmplt_epi32(_mm_srli_epi32(p, 24), _mm_set1_epi32(msf_gif_alpha_threshold));
+            //         out = _mm_or_si128(_mm_and_si128(invAlphaMask, _mm_set1_epi32(paletteSize - 1)), _mm_andnot_si128(invAlphaMask, out));
+
+            //         //TODO: does storing this as a __m128i then reading it back as a u32 violate strict aliasing?
+            //         u32 * c = &cooked[y * width + x];
+            //         _mm_storeu_si128((__m128i *) c, out);
+            //     }
+            // #endif
+
+            //scalar cleanup loop
+            // for (; x < width; ++x) {
+            // for (; x < width; ++x) {
+            assert(paletteSize >= 0);
+            while x<width {defer x += 1;
+                 p := *raw[y * pitch + x * 4];
+
+                //transparent pixel if alpha is low
+                if (p[3] < msf_gif_alpha_threshold) {
+                    cooked[y * width + x] = cast(u32) paletteSize - 1;
+                    continue;
+                }
+
+                dx:int = x & 3;
+                dy:int = y & 3;
+                k:int = ditherKernel[dy * 4 + dx];
+                cooked[y * width + x] =cast(u32)
+                    (min(65535, p[2] * bmul + (k >> bbits)) >> (16 - rbits - gbits - bbits) & bmask) |
+                    (min(65535, p[1] * gmul + (k >> gbits)) >> (16 - rbits - gbits        ) & gmask) |
+                     min(65535, p[0] * rmul + (k >> rbits)) >> (16 - rbits                );
+            }
+        }
+
+        count = 0;
+        // MsfTimeLoop("mark")
+        for i: 0 .. width * height - 1 {
+            used[cooked[i]] = 1;
+        }
+
+        //count used colors, transparent is ignored
+        // MsfTimeLoop("count")
+        // for (int j = 0; j < paletteSize - 1; ++j) {
+        for j: 0 .. paletteSize - 2 {
+            count += used[j];
+        }
+    }
+
+    result := MsfCookedFrame.{ cooked, depth, count, rdepths[depth], gdepths[depth], bdepths[depth] };
+    frame.* = result;
 }
+
+
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+/// Frame Compression                                                                                                ///
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+ msf_put_code :: (writeHead: **u8, blockBits: *u32, len: int, code: u32) {
+    //insert new code into block buffer
+    idx:int =cast(int)( *blockBits) / 8;
+    bit:int =cast(int)( *blockBits) % 8;
+    (writeHead.*)[idx + 0] |= cast(u8) code <<       bit ;
+    (writeHead.*)[idx + 1] |= cast(u8) code >> ( 8 - bit);
+    (writeHead.*)[idx + 2] |= cast(u8) code >> (16 - bit);
+    blockBits.* +=xx len;
+
+    //prep the next block buffer if the current one is full
+    if (blockBits.* >= 256 * 8) {
+        blockBits.* -= 255 * 8;
+        (writeHead.*) += 256;
+        (writeHead.*)[2] = (writeHead.*)[1];
+        (writeHead.*)[1] = (writeHead.*)[0];
+        (writeHead.*)[0] = 255;
+        memset((writeHead.*) + 4, 0, 256);
+    }
+}
+
+MsfStridedList :: struct {
+    data: *s16;
+    len: int;
+    stride: int;
+};
+
+msf_lzw_reset :: inline (lzw: *MsfStridedList, tableSize: int, stride: int) {
+//ppprooofff -> MsfTimeFunc
+    memset(lzw.data, 0xFF, 4096 * stride * size_of(s16));
+    lzw.len = tableSize + 2;
+    lzw.stride = stride;
+}
+
+//PERF TODO: is it possible to use the same array for both `used` and `tlb`?
+ msf_compress_frame :: (/*jai has context already -> void * allocContext, */
+                        width: int, height: int, centiSeconds: int,
+                        frame: MsfCookedFrame, handle: *MsfGifState, used: *u8, tlb: *u8, lzwMem: *s16) -> *MsfGifBuffer
+{
+//pro fi ling -> MsfTimeFunc
+    //NOTE: We reserve enough memory for the theoretical worst case upfront because it's a reasonable amount,
+    //      and prevents us from ever having to check size or realloc during compression.
+    //NOTE: headers + color table + 12 bits per pixel (since 12 bits is the maximum code size)
+    //      + space for at least one full Image Data block (needed for small images since we zero a whole block at a time)
+    maxBufSize:int = offset_of(MsfGifBuffer, "data") + 32 + 256 * 3 + width * height * 3 / 2 + (256 + 4);
+    buffer := cast(*MsfGifBuffer) alloc(maxBufSize);
+    if !buffer return null;
+    writeHead: *u8 = *buffer.data[0];
+    lzw := MsfStridedList.{ lzwMem,0,0 };
+
+    //allocate tlb
+    totalBits:int = frame.rbits + frame.gbits + frame.bbits;
+    tlbSize:int = (1 << totalBits) + 1;
+
+    //generate palette
+    Color3 :: struct {
+        r:u8;
+        g:u8;
+        b:u8;
+     };
+
+    table: [256]Color3;
+    tableIdx:int = 1; //we start counting at 1 because 0 is the transparent color
+    //transparent is always last in the table
+    tlb[tlbSize-1] = 0;
+    // MsfTimeLoop("table")
+    // for (int i = 0; i < tlbSize-1; ++i) {
+    for i: 0..tlbSize-2 {
+        if (used[i]) {
+            tlb[i] =cast(u8) tableIdx;
+            rmask:int = (1 << frame.rbits) - 1;
+            gmask:int = (1 << frame.gbits) - 1;
+            //isolate components
+            r:int = i & rmask;
+            g:int = i >> frame.rbits & gmask;
+            b:int = i >> (frame.rbits + frame.gbits);
+            //shift into highest bits
+            r <<= 8 - frame.rbits;
+            g <<= 8 - frame.gbits;
+            b <<= 8 - frame.bbits;
+            table[tableIdx].r =cast(u8) r | r >> frame.rbits | r >> (frame.rbits * 2) | r >> (frame.rbits * 3);
+            table[tableIdx].g =cast(u8) g | g >> frame.gbits | g >> (frame.gbits * 2) | g >> (frame.gbits * 3);
+            table[tableIdx].b =cast(u8) b | b >> frame.bbits | b >> (frame.bbits * 2) | b >> (frame.bbits * 3);
+            if (msf_gif_bgra_flag) {
+                tmp := table[tableIdx].r;
+                table[tableIdx].r = table[tableIdx].b;
+                table[tableIdx].b = tmp;
+            }
+            tableIdx += 1;
+        }
+    }
+    hasTransparentPixels:int = used[tlbSize-1];
+
+    //SPEC: "Because of some algorithmic constraints however, black & white images which have one color bit
+    //       must be indicated as having a code size of 2."
+    tableBits:int = max(2, msf_bit_log(tableIdx - 1));
+    tableSize:int = 1 << tableBits;
+    //NOTE: we don't just compare `depth` field here because it will be wrong for the first frame and we will segfault
+    previous: MsfCookedFrame = handle.previousFrame;
+    hasSamePal:int = cast(int) (frame.rbits == previous.rbits && frame.gbits == previous.gbits && frame.bbits == previous.bbits);
+    // hasSamePal:int = frame.rbits == previous.rbits && frame.gbits == previous.gbits && frame.bbits == previous.bbits;
+    framesCompatible:int = cast(int)( hasSamePal && !hasTransparentPixels);
+    // framesCompatible:int = hasSamePal && !hasTransparentPixels;
+
+    //write the Graphics `Control Extension` and `Image Descriptor` blocks
+    //NOTE: because __attribute__((__packed__)) is annoyingly compiler-specific, we do this unreadable weirdness
+    // char headerBytes[19] = "\x21\xF9\x04\x05\0\0\0\0" "\x2C\0\0\0\0\0\0\0\0\x80";
+    headerBytes := sprint("\x21\xF9\x04\x05\0\0\0\0\x2C\0\0\0\0\0\0\0\0\x80");
+    assert(headerBytes.count == 19);
+    //NOTE: we need to check the frame number because if we reach into the buffer prior to the first frame,
+    //      we'll just clobber the file header instead, which is a bug
+    if (hasTransparentPixels && handle.framesSubmitted > 0) {
+        (*handle.listTail.data[0])[3] = 0x09; //set the previous frame's disposal to background, so transparency is possible
+    }
+    memcpy(*headerBytes[4], *centiSeconds, 2);
+    memcpy(*headerBytes[13], *width, 2);
+    memcpy(*headerBytes[15], *height, 2);
+    headerBytes[17] |=cast(u8) tableBits - 1;
+    memcpy(writeHead, headerBytes.data, 18);
+    writeHead += 18;
+
+    //write Local Color Table
+    memcpy(writeHead, table.data, tableSize * size_of(Color3));
+    writeHead += tableSize * size_of(Color3);
+    // *writeHead++ = tableBits;
+    writeHead.* =cast(u8) tableBits;
+    writeHead += 1; //?? c weirdness
+
+    //prep first Image Data block (analogous to what we do at the end of msf_put_code())
+    memset(writeHead, 0, 256 + 4); //we write up to 4 bytes ahead of the end of the block - see msf_put_code()
+    writeHead[0] = 255;
+    blockBits:u32 = 8; //relative to block.head
+
+    //SPEC: "Encoders should output a Clear code as the first code of each image data stream."
+    msf_lzw_reset(*lzw, tableSize, tableIdx);
+    msf_put_code(*writeHead, *blockBits, msf_bit_log(lzw.len - 1), cast(u32) tableSize);
+
+    lastCode:int = ifx (framesCompatible && frame.pixels[0] ==  previous.pixels[0]) then 0 else tlb[frame.pixels[0]];
+    // MsfTimeLoop("compress")
+    // for (int i = 1; i < width * height; ++i) {
+    for i : 0.. width * height - 1 {
+        //PERF: branching vs. branchless version of this line is observed to have no discernable impact on speed
+        color: int  = ifx framesCompatible && frame.pixels[i] ==  previous.pixels[i] then 0 else tlb[frame.pixels[i]];
+        // code: int  = (&lzw.data[lastCode * lzw.stride])[color];
+        code: int  = (*lzw.data[lastCode * lzw.stride])[color];
+        if (code < 0) {
+            //write to code stream
+            codeBits: int = msf_bit_log(lzw.len - 1);
+            msf_put_code(*writeHead, *blockBits, codeBits, cast(u32)lastCode);
+
+            if (lzw.len > 4095) {
+                //reset buffer code table
+                msf_put_code(*writeHead, *blockBits, codeBits, cast(u32)tableSize);
+                msf_lzw_reset(*lzw, tableSize, tableIdx);
+            } else {
+                // (&lzw.data[lastCode * lzw.stride])[color] = lzw.len;
+                (*lzw.data[lastCode * lzw.stride])[color] = cast(s16) lzw.len;
+                lzw.len += 1;
+            }
+
+            lastCode = color;
+        } else {
+            lastCode = code;
+        }
+    }
+
+    //write code for leftover index buffer contents, then the end code
+    msf_put_code(*writeHead, *blockBits, min(12, msf_bit_log(lzw.len - 1)), cast(u32) lastCode);
+    msf_put_code(*writeHead, *blockBits, min(12, msf_bit_log(lzw.len)), cast(u32) tableSize + 1);
+
+    //flush remaining data
+    if (blockBits > 8) {
+        bytes: int = (blockBits + 7) / 8; //round up
+        writeHead[0] = cast(u8) bytes - 1;
+        writeHead += bytes;
+    }
+    // *writeHead++ = 0; //terminating block
+    writeHead.* = 0; //terminating block
+    writeHead += 1; //idk man
+
+    //fill in buffer header and shrink buffer to fit data
+    buffer.next = null;
+    buffer.size = writeHead - buffer.data.data;
+    moved := cast(*MsfGifBuffer) realloc(buffer, maxBufSize, offset_of(MsfGifBuffer, "data") + buffer.size);
+         // MSF_GIF_REALLOC(allocContext, buffer, maxBufSize, offset_of(MsfGifBuffer, data) + buffer.size);
+
+    if (!moved)
+    {
+        free(buffer);
+        return null;
+    }
+    return moved;
+}
+
 
 codetoparse :: #string CPP
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -226,11 +571,6 @@ codetoparse :: #string CPP
  */
 int msf_gif_frame(MsfGifState * handle, u8 * pixelData, int centiSecondsPerFrame, int quality, int pitchInBytes);
 
-/**
- * @return                     A block of memory containing the gif file data, or null on error.
- *                             You are responsible for freeing this via `msf_gif_free()`.
- */
-MsfGifResult msf_gif_end(MsfGifState * handle);
 
 /**
  * @param result                The MsfGifResult struct, verbatim as it was returned from `msf_gif_end()`.
@@ -311,6 +651,7 @@ int msf_gif_end_to_file(MsfGifState * handle); //returns 0 on error and non-zero
 //TODO: use compiler-specific notation to force-inline functions currently marked inline
 #if defined(__GNUC__) //gcc, clang
 static inline int msf_bit_log(int i) { return 32 - __builtin_clz(i); }
+
 #elif defined(_MSC_VER) //msvc
 #include <intrin.h>
 static inline int msf_bit_log(int i) { unsigned long idx; _BitScanReverse(&idx, i); return idx + 1; }
@@ -329,296 +670,7 @@ static inline int msf_bit_log(int i) {
     return MultiplyDeBruijnBitPosition[(u32)(i * 0x07C4ACDDU) >> 27] + 1;
 }
 #endif
-static inline int msf_imin(int a, int b) { return a < b? a : b; }
-static inline int msf_imax(int a, int b) { return b < a? a : b; }
 
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-/// Frame Cooking                                                                                                    ///
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-#if (defined (__SSE2__) || defined (_M_X64) || _M_IX86_FP == 2) && !defined(MSF_GIF_NO_SSE2)
-#include <emmintrin.h>
-#endif
-
-int msf_gif_alpha_threshold = 0;
-int msf_gif_bgra_flag = 0;
-
-static void msf_cook_frame(MsfCookedFrame * frame, u8 * raw, u8 * used,
-                           int width, int height, int pitch, int depth)
-{ MsfTimeFunc
-    //bit depth for each channel
-    const static int rdepthsArray[17] = { 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 5, 5 };
-    const static int gdepthsArray[17] = { 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 5, 5, 6 };
-    const static int bdepthsArray[17] = { 0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 5 };
-    //this extra level of indirection looks unnecessary but we need to explicitly decay the arrays to pointers
-    //in order to be able to swap them because of C's annoying not-quite-pointers, not-quite-value-types stack arrays.
-    const int * rdepths = msf_gif_bgra_flag? bdepthsArray : rdepthsArray;
-    const int * gdepths =                                   gdepthsArray;
-    const int * bdepths = msf_gif_bgra_flag? rdepthsArray : bdepthsArray;
-
-    const static int ditherKernel[16] = {
-         0 << 12,  8 << 12,  2 << 12, 10 << 12,
-        12 << 12,  4 << 12, 14 << 12,  6 << 12,
-         3 << 12, 11 << 12,  1 << 12,  9 << 12,
-        15 << 12,  7 << 12, 13 << 12,  5 << 12,
-    };
-
-    u32 * cooked = frame.pixels;
-    int count = 0;
-    MsfTimeLoop("do") do {
-        int rbits = rdepths[depth], gbits = gdepths[depth], bbits = bdepths[depth];
-        int paletteSize = (1 << (rbits + gbits + bbits)) + 1;
-        memset(used, 0, paletteSize * sizeof(u8));
-
-        //TODO: document what this math does and why it's correct
-        int rdiff = (1 << (8 - rbits)) - 1;
-        int gdiff = (1 << (8 - gbits)) - 1;
-        int bdiff = (1 << (8 - bbits)) - 1;
-        short rmul = (short) ((255.0f - rdiff) / 255.0f * 257);
-        short gmul = (short) ((255.0f - gdiff) / 255.0f * 257);
-        short bmul = (short) ((255.0f - bdiff) / 255.0f * 257);
-
-        int gmask = ((1 << gbits) - 1) << rbits;
-        int bmask = ((1 << bbits) - 1) << rbits << gbits;
-
-        MsfTimeLoop("cook") for (int y = 0; y < height; ++y) {
-            int x = 0;
-
-            #if (defined (__SSE2__) || defined (_M_X64) || _M_IX86_FP == 2) && !defined(MSF_GIF_NO_SSE2)
-                __m128i k = _mm_loadu_si128((__m128i *) &ditherKernel[(y & 3) * 4]);
-                __m128i k2 = _mm_or_si128(_mm_srli_epi32(k, rbits), _mm_slli_epi32(_mm_srli_epi32(k, bbits), 16));
-                for (; x < width - 3; x += 4) {
-                    u8 * pixels = &raw[y * pitch + x * 4];
-                    __m128i p = _mm_loadu_si128((__m128i *) pixels);
-
-                    __m128i rb = _mm_and_si128(p, _mm_set1_epi32(0x00FF00FF));
-                    __m128i rb1 = _mm_mullo_epi16(rb, _mm_set_epi16(bmul, rmul, bmul, rmul, bmul, rmul, bmul, rmul));
-                    __m128i rb2 = _mm_adds_epu16(rb1, k2);
-                    __m128i r3 = _mm_srli_epi32(_mm_and_si128(rb2, _mm_set1_epi32(0x0000FFFF)), 16 - rbits);
-                    __m128i b3 = _mm_and_si128(_mm_srli_epi32(rb2, 32 - rbits - gbits - bbits), _mm_set1_epi32(bmask));
-
-                    __m128i g = _mm_and_si128(_mm_srli_epi32(p, 8), _mm_set1_epi32(0x000000FF));
-                    __m128i g1 = _mm_mullo_epi16(g, _mm_set1_epi32(gmul));
-                    __m128i g2 = _mm_adds_epu16(g1, _mm_srli_epi32(k, gbits));
-                    __m128i g3 = _mm_and_si128(_mm_srli_epi32(g2, 16 - rbits - gbits), _mm_set1_epi32(gmask));
-
-                    __m128i out = _mm_or_si128(_mm_or_si128(r3, g3), b3);
-
-                    //mask in transparency based on threshold
-                    //NOTE: we can theoretically do a sub instead of srli by doing an unsigned compare via bias
-                    //      to maybe save a TINY amount of throughput? but lol who cares maybe I'll do it later -m
-                    __m128i invAlphaMask = _mm_cmplt_epi32(_mm_srli_epi32(p, 24), _mm_set1_epi32(msf_gif_alpha_threshold));
-                    out = _mm_or_si128(_mm_and_si128(invAlphaMask, _mm_set1_epi32(paletteSize - 1)), _mm_andnot_si128(invAlphaMask, out));
-
-                    //TODO: does storing this as a __m128i then reading it back as a u32 violate strict aliasing?
-                    u32 * c = &cooked[y * width + x];
-                    _mm_storeu_si128((__m128i *) c, out);
-                }
-            #endif
-
-            //scalar cleanup loop
-            for (; x < width; ++x) {
-                u8 * p = &raw[y * pitch + x * 4];
-
-                //transparent pixel if alpha is low
-                if (p[3] < msf_gif_alpha_threshold) {
-                    cooked[y * width + x] = paletteSize - 1;
-                    continue;
-                }
-
-                int dx = x & 3, dy = y & 3;
-                int k = ditherKernel[dy * 4 + dx];
-                cooked[y * width + x] =
-                    (msf_imin(65535, p[2] * bmul + (k >> bbits)) >> (16 - rbits - gbits - bbits) & bmask) |
-                    (msf_imin(65535, p[1] * gmul + (k >> gbits)) >> (16 - rbits - gbits        ) & gmask) |
-                     msf_imin(65535, p[0] * rmul + (k >> rbits)) >> (16 - rbits                );
-            }
-        }
-
-        count = 0;
-        MsfTimeLoop("mark") for (int i = 0; i < width * height; ++i) {
-            used[cooked[i]] = 1;
-        }
-
-        //count used colors, transparent is ignored
-        MsfTimeLoop("count") for (int j = 0; j < paletteSize - 1; ++j) {
-            count += used[j];
-        }
-    } while (count >= 256 && --depth);
-
-    MsfCookedFrame ret = { cooked, depth, count, rdepths[depth], gdepths[depth], bdepths[depth] };
-    *frame = ret;
-}
-
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-/// Frame Compression                                                                                                ///
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-static inline void msf_put_code(u8 * * writeHead, u32 * blockBits, int len, u32 code) {
-    //insert new code into block buffer
-    int idx = *blockBits / 8;
-    int bit = *blockBits % 8;
-    (*writeHead)[idx + 0] |= code <<       bit ;
-    (*writeHead)[idx + 1] |= code >> ( 8 - bit);
-    (*writeHead)[idx + 2] |= code >> (16 - bit);
-    *blockBits += len;
-
-    //prep the next block buffer if the current one is full
-    if (*blockBits >= 256 * 8) {
-        *blockBits -= 255 * 8;
-        (*writeHead) += 256;
-        (*writeHead)[2] = (*writeHead)[1];
-        (*writeHead)[1] = (*writeHead)[0];
-        (*writeHead)[0] = 255;
-        memset((*writeHead) + 4, 0, 256);
-    }
-}
-
-typedef struct {
-    s16 * data;
-    int len;
-    int stride;
-} MsfStridedList;
-
-static inline void msf_lzw_reset(MsfStridedList * lzw, int tableSize, int stride) { MsfTimeFunc
-    memset(lzw.data, 0xFF, 4096 * stride * sizeof(s16));
-    lzw.len = tableSize + 2;
-    lzw.stride = stride;
-}
-
-//PERF TODO: is it possible to use the same array for both `used` and `tlb`?
-static MsfGifBuffer * msf_compress_frame(void * allocContext, int width, int height, int centiSeconds,
-                                         MsfCookedFrame frame, MsfGifState * handle, u8 * used, u8 * tlb, s16 * lzwMem)
-{ MsfTimeFunc
-    //NOTE: We reserve enough memory for the theoretical worst case upfront because it's a reasonable amount,
-    //      and prevents us from ever having to check size or realloc during compression.
-    //NOTE: headers + color table + 12 bits per pixel (since 12 bits is the maximum code size)
-    //      + space for at least one full Image Data block (needed for small images since we zero a whole block at a time)
-    int maxBufSize = offsetof(MsfGifBuffer, data) + 32 + 256 * 3 + width * height * 3 / 2 + (256 + 4);
-    MsfGifBuffer * buffer = (MsfGifBuffer *) MSF_GIF_MALLOC(allocContext, maxBufSize);
-    if (!buffer) { return null; }
-    u8 * writeHead = buffer.data;
-    MsfStridedList lzw = { lzwMem };
-
-    //allocate tlb
-    int totalBits = frame.rbits + frame.gbits + frame.bbits;
-    int tlbSize = (1 << totalBits) + 1;
-
-    //generate palette
-    typedef struct { u8 r, g, b; } Color3;
-    Color3 table[256] = { {0} };
-    int tableIdx = 1; //we start counting at 1 because 0 is the transparent color
-    //transparent is always last in the table
-    tlb[tlbSize-1] = 0;
-    MsfTimeLoop("table") for (int i = 0; i < tlbSize-1; ++i) {
-        if (used[i]) {
-            tlb[i] = tableIdx;
-            int rmask = (1 << frame.rbits) - 1;
-            int gmask = (1 << frame.gbits) - 1;
-            //isolate components
-            int r = i & rmask;
-            int g = i >> frame.rbits & gmask;
-            int b = i >> (frame.rbits + frame.gbits);
-            //shift into highest bits
-            r <<= 8 - frame.rbits;
-            g <<= 8 - frame.gbits;
-            b <<= 8 - frame.bbits;
-            table[tableIdx].r = r | r >> frame.rbits | r >> (frame.rbits * 2) | r >> (frame.rbits * 3);
-            table[tableIdx].g = g | g >> frame.gbits | g >> (frame.gbits * 2) | g >> (frame.gbits * 3);
-            table[tableIdx].b = b | b >> frame.bbits | b >> (frame.bbits * 2) | b >> (frame.bbits * 3);
-            if (msf_gif_bgra_flag) {
-                u8 temp = table[tableIdx].r;
-                table[tableIdx].r = table[tableIdx].b;
-                table[tableIdx].b = temp;
-            }
-            ++tableIdx;
-        }
-    }
-    int hasTransparentPixels = used[tlbSize-1];
-
-    //SPEC: "Because of some algorithmic constraints however, black & white images which have one color bit
-    //       must be indicated as having a code size of 2."
-    int tableBits = msf_imax(2, msf_bit_log(tableIdx - 1));
-    int tableSize = 1 << tableBits;
-    //NOTE: we don't just compare `depth` field here because it will be wrong for the first frame and we will segfault
-    MsfCookedFrame previous = handle.previousFrame;
-    int hasSamePal = frame.rbits == previous.rbits && frame.gbits == previous.gbits && frame.bbits == previous.bbits;
-    int framesCompatible = hasSamePal && !hasTransparentPixels;
-
-    //write the Graphics `Control Extension` and `Image Descriptor` blocks
-    //NOTE: because __attribute__((__packed__)) is annoyingly compiler-specific, we do this unreadable weirdness
-    char headerBytes[19] = "\x21\xF9\x04\x05\0\0\0\0" "\x2C\0\0\0\0\0\0\0\0\x80";
-    //NOTE: we need to check the frame number because if we reach into the buffer prior to the first frame,
-    //      we'll just clobber the file header instead, which is a bug
-    if (hasTransparentPixels && handle.framesSubmitted > 0) {
-        handle.listTail.data[3] = 0x09; //set the previous frame's disposal to background, so transparency is possible
-    }
-    memcpy(&headerBytes[4], &centiSeconds, 2);
-    memcpy(&headerBytes[13], &width, 2);
-    memcpy(&headerBytes[15], &height, 2);
-    headerBytes[17] |= tableBits - 1;
-    memcpy(writeHead, headerBytes, 18);
-    writeHead += 18;
-
-    //write Local Color Table
-    memcpy(writeHead, table, tableSize * sizeof(Color3));
-    writeHead += tableSize * sizeof(Color3);
-    *writeHead++ = tableBits;
-
-    //prep first Image Data block (analogous to what we do at the end of msf_put_code())
-    memset(writeHead, 0, 256 + 4); //we write up to 4 bytes ahead of the end of the block - see msf_put_code()
-    writeHead[0] = 255;
-    u32 blockBits = 8; //relative to block.head
-
-    //SPEC: "Encoders should output a Clear code as the first code of each image data stream."
-    msf_lzw_reset(&lzw, tableSize, tableIdx);
-    msf_put_code(&writeHead, &blockBits, msf_bit_log(lzw.len - 1), tableSize);
-
-    int lastCode = framesCompatible && frame.pixels[0] == previous.pixels[0]? 0 : tlb[frame.pixels[0]];
-    MsfTimeLoop("compress") for (int i = 1; i < width * height; ++i) {
-        //PERF: branching vs. branchless version of this line is observed to have no discernable impact on speed
-        int color = framesCompatible && frame.pixels[i] == previous.pixels[i]? 0 : tlb[frame.pixels[i]];
-        int code = (&lzw.data[lastCode * lzw.stride])[color];
-        if (code < 0) {
-            //write to code stream
-            int codeBits = msf_bit_log(lzw.len - 1);
-            msf_put_code(&writeHead, &blockBits, codeBits, lastCode);
-
-            if (lzw.len > 4095) {
-                //reset buffer code table
-                msf_put_code(&writeHead, &blockBits, codeBits, tableSize);
-                msf_lzw_reset(&lzw, tableSize, tableIdx);
-            } else {
-                (&lzw.data[lastCode * lzw.stride])[color] = lzw.len;
-                ++lzw.len;
-            }
-
-            lastCode = color;
-        } else {
-            lastCode = code;
-        }
-    }
-
-    //write code for leftover index buffer contents, then the end code
-    msf_put_code(&writeHead, &blockBits, msf_imin(12, msf_bit_log(lzw.len - 1)), lastCode);
-    msf_put_code(&writeHead, &blockBits, msf_imin(12, msf_bit_log(lzw.len)), tableSize + 1);
-
-    //flush remaining data
-    if (blockBits > 8) {
-        int bytes = (blockBits + 7) / 8; //round up
-        writeHead[0] = bytes - 1;
-        writeHead += bytes;
-    }
-    *writeHead++ = 0; //terminating block
-
-    //fill in buffer header and shrink buffer to fit data
-    buffer.next = null;
-    buffer.size = writeHead - buffer.data;
-    MsfGifBuffer * moved =
-        (MsfGifBuffer *) MSF_GIF_REALLOC(allocContext, buffer, maxBufSize, offsetof(MsfGifBuffer, data) + buffer.size);
-    if (!moved) { MSF_GIF_FREE(allocContext, buffer, maxBufSize); return null; }
-    return moved;
-}
 
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -638,7 +690,7 @@ int msf_gif_frame_to_file(MsfGifState * handle, u8 * pixelData, int centiSeconds
     MsfGifBuffer * head = handle.listHead;
     if (!handle.fileWriteFunc(head.data, head.size, 1, handle.fileWriteData)) { msf_free_gif_state(handle); return 0; }
     handle.listHead = head.next;
-    MSF_GIF_FREE(handle.customAllocatorContext, head, offsetof(MsfGifBuffer, data) + head.size);
+    MSF_GIF_FREE(handle.customAllocatorContext, head, offset_of(MsfGifBuffer, "data") + head.size);
     return 1;
 }
 
@@ -672,8 +724,8 @@ msf_free_gif_state :: (handle: *MsfGifState) {
     if (handle.lzwMem) free(handle.lzwMem);
     if (handle.tlbMem) free(handle.tlbMem);
     if (handle.usedMem) free(handle.usedMem);
-    // if (handle.previousFrame.pixels) MSF_GIF_FREE(handle.customAllocatorContext, handle.previousFrame.pixels, handle.width * handle.height * sizeof(u32));
-    // if (handle.currentFrame.pixels)  MSF_GIF_FREE(handle.customAllocatorContext, handle.currentFrame.pixels, handle.width * handle.height * sizeof(u32));
+    // if (handle.previousFrame.pixels) MSF_GIF_FREE(handle.customAllocatorContext, handle.previousFrame.pixels, handle.width * handle.height * size_of(u32));
+    // if (handle.currentFrame.pixels)  MSF_GIF_FREE(handle.customAllocatorContext, handle.currentFrame.pixels, handle.width * handle.height * size_of(u32));
     // if (handle.lzwMem) MSF_GIF_FREE(handle.customAllocatorContext, handle.lzwMem, lzwAllocSize);
     // if (handle.tlbMem) MSF_GIF_FREE(handle.customAllocatorContext, handle.tlbMem, tlbAllocSize);
     // if (handle.usedMem) MSF_GIF_FREE(handle.customAllocatorContext, handle.usedMem, usedAllocSize);
@@ -688,33 +740,46 @@ msf_free_gif_state :: (handle: *MsfGifState) {
 }
 
 
-// int msf_gif_frame(MsfGifState * handle, u8 * pixelData, int centiSecondsPerFrame, int quality, int pitchInBytes)
-// { MsfTimeFunc
-//     if (!handle.listHead) { return 0; }
-//     //TODO: sanity-check `pitchInBytes`
+msf_gif_frame :: (handle: *MsfGifState, pixelData: *u8, centiSecondsPerFrame: int, quality: int, pitchInBytes: int) -> int
+{
+    //-> profile -> MsfTimeFunc
+    if !handle.listHead return 0;
 
-//     quality = msf_imax(1, msf_imin(16, quality));
-//     if (pitchInBytes == 0) pitchInBytes = handle.width * 4;
-//     if (pitchInBytes < 0) pixelData -= pitchInBytes * (handle.height - 1);
+    //TODO: sanity-check `pitchInBytes`
 
-//     msf_cook_frame(&handle.currentFrame, pixelData, handle.usedMem, handle.width, handle.height, pitchInBytes,
-//         msf_imin(quality, handle.previousFrame.depth + 160 / msf_imax(1, handle.previousFrame.count)));
+    // quality = msf_imax(1, min(16, quality));
+    if pitchInBytes == 0 then pitchInBytes = handle.width * 4;
+    if pitchInBytes < 0 then pixelData -= pitchInBytes * (handle.height - 1);
 
-//     MsfGifBuffer * buffer = msf_compress_frame(handle.customAllocatorContext, handle.width, handle.height,
-//         centiSecondsPerFrame, handle.currentFrame, handle, handle.usedMem, handle.tlbMem, handle.lzwMem);
-//     if (!buffer) { msf_free_gif_state(handle); return 0; }
-//     handle.listTail.next = buffer;
-//     handle.listTail = buffer;
+    msf_cook_frame(*handle.currentFrame, pixelData, handle.usedMem, handle.width, handle.height, pitchInBytes,
+        min(quality, handle.previousFrame.depth + 160 / max(1, handle.previousFrame.count)));
 
-//     //swap current and previous frames
-//     MsfCookedFrame tmp = handle.previousFrame;
-//     handle.previousFrame = handle.currentFrame;
-//     handle.currentFrame = tmp;
+    buffer: *MsfGifBuffer;
+    buffer = msf_compress_frame(handle.width, handle.height,
+        centiSecondsPerFrame, handle.currentFrame, handle, handle.usedMem, handle.tlbMem, handle.lzwMem);
 
-//     handle.framesSubmitted += 1;
-//     return 1;
-// }
+    if !buffer {
+        msf_free_gif_state(handle);
+        return 0;
+    }
 
+    handle.listTail.next = buffer;
+    handle.listTail = buffer;
+
+    //swap current and previous frames
+    tmp := handle.previousFrame;
+    handle.previousFrame = handle.currentFrame;
+    handle.currentFrame = tmp;
+
+    handle.framesSubmitted += 1;
+    return 1;
+}
+
+
+/**
+ * @return                     A block of memory containing the gif file data, or null on error.
+ *                             You are responsible for freeing this via `msf_gif_free()`.
+ */
 msf_gif_end :: (handle: *MsfGifState) -> MsfGifResult {
     //profile->MsfTimeFunc
     if !handle.listHead return .{};
