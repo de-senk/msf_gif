@@ -1,6 +1,6 @@
 # Prerequisites
 *.d
-
+.build
 # Compiled Object files
 *.slo
 *.lo
@@ -22,6 +22,7 @@
 
 # Compiled Static libraries
 *.lai
+*.pdb
 *.la
 *.a
 *.lib
