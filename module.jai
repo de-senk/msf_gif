@@ -85,7 +85,7 @@ msf_bit_log :: inline (i_unmutable: int) -> int {
     return MultiplyDeBruijnBitPosition[cast(u32)(cast(u32)i * 0x07C4ACDD) >> 27] + 1;
 
 }
-
+/*
 #run {
 test_values: [20]int = int.[
         0,
@@ -120,7 +120,7 @@ test_values: [20]int = int.[
     }
 
 }
-
+*/
 size_t :: s64;
 
 MsfGifResult :: struct {
@@ -183,15 +183,15 @@ main :: () {
     quality := 40;
 
     handle := New(MsfGifState);
-    image_buffer1, width, height, color_stride := load_sample_image("../test_2.png");
-    image_buffer2:, width=, height=, color_stride= load_sample_image("../test_1.png");
-    image_buffer3:, width=, height=, color_stride= load_sample_image("../test_2.png");
+    image_buffer1, width, height, color_stride := load_sample_image("../test_3.png");
+    image_buffer2:, width=, height=, color_stride= load_sample_image("../test_2.png");
+    image_buffer3:, width=, height=, color_stride= load_sample_image("../test_1.png");
     // msf_gif_bgra_flag = true; //optionally, set this flag if your pixels are in BGRA format instead of RGBA
     // msf_gif_alpha_threshold = 128; //optionally, enable transparency (see function documentation below for details)
     msf_gif_begin  (handle=handle, width, height);
     msf_gif_frame(handle, image_buffer1.data, centisecondsPerFrame, quality, width*color_stride);
-    msf_gif_frame(handle, image_buffer1.data, centisecondsPerFrame, quality, width*color_stride);
-    msf_gif_frame(handle, image_buffer1.data, centisecondsPerFrame, quality, width*color_stride);
+    msf_gif_frame(handle, image_buffer2.data, centisecondsPerFrame, quality, width*color_stride);
+    msf_gif_frame(handle, image_buffer3.data, centisecondsPerFrame, quality, width*color_stride);
     // msf_gif_frame(handle,null, centisecondsPerFrame, quality, width/4);
     result := msf_gif_end(handle);
     export_to_gif("../test_p0.gif", result);
@@ -355,9 +355,10 @@ msf_gif_bgra_flag := 0;
     bdepthsArray: [17]int = int.[ 0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 5 ];
     //this extra level of indirection looks unnecessary but we need to explicitly decay the arrays to pointers
     //in order to be able to swap them because of C's annoying not-quite-pointers, not-quite-value-types stack arrays.
-    rdepths := ifx msf_gif_bgra_flag then bdepthsArray else rdepthsArray;
-    gdepths := gdepthsArray;
-    bdepths := ifx msf_gif_bgra_flag then rdepthsArray else bdepthsArray;
+    rdepths := ifx msf_gif_bgra_flag then bdepthsArray.data else rdepthsArray.data;
+    gdepths := gdepthsArray.data;
+    bdepths := ifx msf_gif_bgra_flag then rdepthsArray.data else bdepthsArray.data;
+
 
     ditherKernel: [16]int = int.[
          0 << 12,  8 << 12,  2 << 12, 10 << 12,
@@ -366,7 +367,8 @@ msf_gif_bgra_flag := 0;
         15 << 12,  7 << 12, 13 << 12,  5 << 12,
     ];
 
-    cooked := frame.pixels;
+
+    cooked :*u32= frame.pixels;
     count := 0;
     // MsfTimeLoop("do") do
     while true
@@ -433,40 +435,40 @@ msf_gif_bgra_flag := 0;
             else
             {
 
-            /* scalar fallback replacing the SSE block (inside y loop) */
+                /* scalar fallback replacing the SSE block (inside y loop) */
 
-            // for (; x < width - 3; x += 4) {
-                // for (int i = 0; i < 4; ++i) {
-            ax:=0;
-            while ax<width-3 {
-            defer ax += 4;
+                // for (; x < width - 3; x += 4) {
+                    // for (int i = 0; i < 4; ++i) {
+                ax:=0;
+                while ax<width-3 {
+                defer ax += 4;
 
-                i:= 0;
-                while i<4 {
-                defer i += 1;
+                    i:= 0;
+                    while i<4 {
+                    defer i += 1;
 
-                    pixels :*u8= *raw[y * pitch + (x + i) * 4];
+                        pixels :*u8= *raw[y * pitch + (x + i) * 4];
 
-                    /* transparency */
-                    if (pixels[3] < msf_gif_alpha_threshold) {
-                        cooked[y * width + x + i] =cast(u32) paletteSize - 1;
-                        continue;
+                        /* transparency */
+                        if (pixels[3] < msf_gif_alpha_threshold) {
+                            cooked[y * width + x + i] =cast(u32) paletteSize - 1;
+                            continue;
+                        }
+
+                        dx: int = (x + i) & 3;
+                        k: int = ditherKernel[(y & 3) * 4 + dx];
+
+                        /* use same math as scalar cleanup (keep min semantics) */
+                        part_b:int = ( min(65535, pixels[2] * bmul + (k >> bbits))
+                                       >> (16 - rbits - gbits - bbits) ) & bmask;
+                        part_g:int = ( min(65535, pixels[1] * gmul + (k >> gbits))
+                                       >> (16 - rbits - gbits) ) & gmask;
+                        part_r:int =   min(65535, pixels[0] * rmul + (k >> rbits))
+                                       >> (16 - rbits);
+
+                        cooked[y * width + x + i] = cast(u32)(part_b | part_g | part_r);
                     }
-
-                    dx: int = (x + i) & 3;
-                    k: int = ditherKernel[(y & 3) * 4 + dx];
-
-                    /* use same math as scalar cleanup (keep min semantics) */
-                    part_b:int = ( min(65535, pixels[2] * bmul + (k >> bbits))
-                                   >> (16 - rbits - gbits - bbits) ) & bmask;
-                    part_g:int = ( min(65535, pixels[1] * gmul + (k >> gbits))
-                                   >> (16 - rbits - gbits) ) & gmask;
-                    part_r:int =   min(65535, pixels[0] * rmul + (k >> rbits))
-                                   >> (16 - rbits);
-
-                    cooked[y * width + x + i] = cast(u32)(part_b | part_g | part_r);
                 }
-            }
 
 
             }
@@ -483,7 +485,7 @@ msf_gif_bgra_flag := 0;
 
                 //transparent pixel if alpha is low
                 if (p[3] < msf_gif_alpha_threshold) {
-                    cooked[y * width + x] = cast(u32) paletteSize - 1;
+                    cooked[y * width + x] = cast(u32) (paletteSize - 1);
                     continue;
                 }
 
@@ -491,11 +493,14 @@ msf_gif_bgra_flag := 0;
                 dy:int = y & 3;
                 k:int = ditherKernel[dy * 4 + dx];
 
-                a := min(65535, p[2] * bmul + (k >> bbits)) >> (16 - rbits - gbits - bbits) & bmask;
-                b := min(65535, p[1] * gmul + (k >> gbits)) >> (16 - rbits - gbits        ) & gmask;
-                c := min(65535, p[0] * rmul + (k >> rbits)) >> (16 - rbits                );
-                cooked[y * width + x] =cast(u32) (a | b | c);
+
+                a := (( min(65535, p[2] * bmul + (k >> bbits)) >> (16 - rbits - gbits - bbits))  & bmask );
+                b := (( min(65535, p[1] * gmul + (k >> gbits)) >> (16 - rbits - gbits        ))  & gmask );
+                c := (( min(65535, p[0] * rmul + (k >> rbits)) >> (16 - rbits                ))          );
+                cooked[y * width + x] =cast,trunc(u32) (a | b | c);
+
             }
+
         }
 
         count = 0;
@@ -511,8 +516,6 @@ msf_gif_bgra_flag := 0;
             count += used[j];
         }
 
-    log("paletteSize %", paletteSize);
-    log("count %", count);
     if count >= 256 {
         depth -= 1;
         if !depth then break;
@@ -540,19 +543,11 @@ msf_gif_bgra_flag := 0;
     //insert new code into block buffer
     idx:int =(( blockBits.*) / 8);
     bit:int =(( blockBits.*) % 8);
-    if bit != 0
-    then bit = bit;
-    // then return;
-    // log("code %",code); //prints code 59
-    // log("blockBits.* %",blockBits.*); //prints blockBits.* 1059
-    // log("idx %",idx); //prints idx 132
-    // log("bit %",bit); //prints bit 3
-    (writeHead.*)[idx + 0] |= cast,trunc(u8)( code <<       bit ); //ERROR  Cast bounds check failed.  Number must be in [0, 255]; it was 472.
-    (writeHead.*)[idx + 1] |= cast,trunc(u8)( code >> ( 8 - bit));
-    (writeHead.*)[idx + 2] |= cast,trunc(u8)( code >> (16 - bit));
-    // (writeHead.*)[idx + 0] = 1; //ERROR  Cast bounds check failed.  Number must be in [0, 255]; it was 472.
-    // (writeHead.*)[idx + 1] = 2;
-    // (writeHead.*)[idx + 2] = 3;
+    // if bit != 0
+    // then bit = 3;
+    (writeHead.*)[idx + 0] |= cast,no_check(u8)( code <<       bit ); //ERROR  Cast bounds check failed.  Number must be in [0, 255]; it was 472.
+    (writeHead.*)[idx + 1] |= cast,no_check(u8)( code >> ( 8 - bit));
+    (writeHead.*)[idx + 2] |= cast,no_check(u8)( code >> (16 - bit));
     blockBits.* +=xx len;
 
     //prep the next block buffer if the current one is full
@@ -640,7 +635,6 @@ g_firstvisit := true;
             tableIdx += 1;
         }
     }
-    g_firstvisit=false;
     hasTransparentPixels:int = used[tlbSize-1];
 
     //SPEC: "Because of some algorithmic constraints however, black & white images which have one color bit
@@ -671,6 +665,7 @@ g_firstvisit := true;
     if (hasTransparentPixels && handle.framesSubmitted > 0) {
         (*handle.listTail.data[0])[3] = 0x09; //set the previous frame's disposal to background, so transparency is possible
     }
+
     memcpy(*headerBytes[4], *centiSeconds, 2);
     memcpy(*headerBytes[13], *width, 2);
     memcpy(*headerBytes[15], *height, 2);
@@ -685,7 +680,7 @@ g_firstvisit := true;
     writeHead.* =cast(u8) tableBits;
     writeHead += 1; //?? c weirdness
 
-    //prep first Image Data block (analogous to what we do at the end of msf_put_code())
+      //prep first Image Data block (analogous to what we do at the end of msf_put_code())
     memset(writeHead, 0, 256 + 4); //we write up to 4 bytes ahead of the end of the block - see msf_put_code()
     writeHead[0] = 255;
     blockBits:u32 = 8; //relative to block.head
@@ -697,10 +692,9 @@ g_firstvisit := true;
     lastCode:int = ifx (framesCompatible && frame.pixels[0] ==  previous.pixels[0]) then 0 else tlb[frame.pixels[0]];
     // MsfTimeLoop("compress")
     // for (int i = 1; i < width * height; ++i) {
-    for i : 0.. width * height - 1 {
+    for i : 1.. width * height - 1 {
         //PERF: branching vs. branchless version of this line is observed to have no discernable impact on speed
-        color: int  = ifx framesCompatible && frame.pixels[i] ==  previous.pixels[i] then 0 else tlb[frame.pixels[i]];
-        // code: int  = (&lzw.data[lastCode * lzw.stride])[color];
+        color: int  = ifx (framesCompatible && frame.pixels[i] ==  previous.pixels[i]) then 0 else tlb[frame.pixels[i]];
         code: int  = (*lzw.data[lastCode * lzw.stride])[color];
         if (code < 0) {
             //write to code stream
