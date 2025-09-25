@@ -1,3 +1,4 @@
+
 /*
 HOW TO USE:
 
@@ -177,7 +178,9 @@ offset_of :: ($T: Type, $member: string) -> int {
     assert(false, "Type '%' does not have member '%'", T, member);
     return -1;
 }
+
 #scope_export
+// #if #exists(__IPROF) #load "examples/example1.jai";
 
 msf_gif_begin :: (handle: *MsfGifState, width: int, height: int) -> int {
     //profiler->MsfTimeFunc

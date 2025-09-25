@@ -1,5 +1,10 @@
-#import,file "../module.jai";
+// #if #exists(__IPROF)
+#load "../module.jai";
+// else
+// #import,file "../module.jai";
+
 #import "Basic";
+
 main :: () {
     // width := 480;
     // height := 320;
@@ -8,9 +13,14 @@ main :: () {
 
     handle := New(MsfGifState);
     defer free(handle);
-    image_buffer1, width, height, color_stride,is_not_stb1 :=    load_sample_image("../test_p0.jpg");
-    image_buffer2:, width=, height=, color_stride=,is_not_stb2:= load_sample_image("../test_p1.jpg");
-    image_buffer3:, width=, height=, color_stride=,is_not_stb3:= load_sample_image("../test_p2.jpg");
+    // image_buffer1, width, height, color_stride,is_not_stb1 :=    load_sample_image("../TEST_1r.png");
+    // image_buffer1, width, height, color_stride,is_not_stb1 :=    load_sample_image("../test_p0.jpg");
+    // image_buffer2:, width=, height=, color_stride=,is_not_stb2:= load_sample_image("../test_p1.jpg");
+    // image_buffer3:, width=, height=, color_stride=,is_not_stb3:= load_sample_image("../test_p2.jpg");
+
+    image_buffer1, width, height, color_stride,is_not_stb1 :=    load_sample_image("../TEST_1r.png");
+    image_buffer2:, width=, height=, color_stride=,is_not_stb2:= load_sample_image("../TEST_1g.png");
+    image_buffer3:, width=, height=, color_stride=,is_not_stb3:= load_sample_image("../TEST_1b.png");
     // msf_gif_bgra_flag = true; //optionally, set this flag if your pixels are in BGRA format instead of RGBA
     // msf_gif_alpha_threshold = 128; //optionally, enable transparency (see function documentation below for details)
     msf_gif_begin  (handle=handle, width, height);
@@ -56,41 +66,15 @@ load_sample_image :: (filename: string) -> image_buffer: []u8, width: int, heigh
     // assert(nrChannels == 4, "[ERROR] num channels is not 4, %",nrChannels);
     log("w % h % c %", width, height, nrChannels);
 
-    if nrChannels == 3 //force all textures to be 4 channels
-      {
-
-        original_view:[]u8;
-        original_view.data = xx img_data;
-        original_view.count = width * height * 3;
-
-
-        target_pointer := alloc(width * height * 4);
-        target_view:[]u8;
-        target_view.data = target_pointer;
-        target_view.count = width * height * 4;
-
-        strided_offset := 0;
-        for original_view
-        {
-          strided_idx := it_index+strided_offset;
-          target_view[strided_idx] = it;
-          if (it_index+1) % 3 == 0
-          {
-            // assert();
-            target_view[strided_idx+1] = 255; //set alpha to 1, I think 1 means opaque?
-            strided_offset += 1;
-          }
-        }
-        //Order is important, this should happen here
-        nrChannels = 4;
-        image.stbi_image_free(img_data);
+    if nrChannels != 4 //force all textures to be 4 channels
+    {
+        old_ptr := force_image_into_4_channels(*img_data, width, height, nrChannels);
+        image.stbi_image_free(old_ptr);
         should_not_deallocate_by_stb = true;
-        original_view.data = target_view.data; //UNUSED
-        img_data = target_pointer; //USED BELOW
+        nrChannels = 4;
+    }
 
-         log("reallocated image memory % and freed the previous one", strided_offset);    //reallocate to 4
 
-      }
 
     image_buffer: []u8;
     image_buffer.count = width * height * 4;
@@ -108,3 +92,63 @@ free_sample_image :: (image_buffer: []u8, is_not_stb: bool) {
         image.stbi_image_free(image_buffer.data);
     }
 }
+
+
+force_image_into_4_channels::(ptr_ptr_img_data: **u8, width: int, height: int, nrChannels: int) -> *u8
+{
+    old_ptr := ptr_ptr_img_data.*;
+    original_view:[]u8;
+    original_view.data = xx ptr_ptr_img_data.*;
+    log("width * height * nrChannels % % %",width , height , nrChannels);
+    original_view.count = width * height * nrChannels;
+
+
+    target_pointer := alloc(width * height * 4);
+    target_view:[]u8;
+    target_view.data = target_pointer;
+    target_view.count = width * height * 4;
+
+    strided_offset := 0;
+
+    //we add other channles at 0, but for alpha we set it to 1
+    for original_view
+    {
+      strided_idx := it_index+strided_offset;
+      target_view[strided_idx] = it;
+      if nrChannels == 3 {
+          if (it_index+1) % nrChannels == 0 //if (it_index+1) % 3 == 0
+          {
+            target_view[strided_idx+1] = 255; //set alpha to 1, I think 1 means opaque?
+            strided_offset += 1;
+          }
+      }
+      //what to do here? second channel may represent alpha...
+        if nrChannels == 2 {
+          if (it_index+1) % nrChannels == 0 //if (it_index+1) % 3 == 0
+          {
+            target_view[strided_idx+1] = 0; //blue
+            target_view[strided_idx+2] = 255; //set alpha to 1, I think 1 means opaque?
+            strided_offset += 1;
+            strided_offset += 1;
+          }
+      }
+        if nrChannels == 1 {
+          if (it_index+1) % nrChannels == 0 //if (it_index+1) % 3 == 0
+          {
+            target_view[strided_idx+1] = 0; //green
+            target_view[strided_idx+2] = 0; //blue
+            target_view[strided_idx+3] = 255; //set alpha to 1, I think 1 means opaque?
+            strided_offset += 1;
+            strided_offset += 1;
+            strided_offset += 1;
+          }
+      }
+    }
+
+    // original_view.data = target_view.data; //UNUSED
+    ptr_ptr_img_data.* = target_pointer; //USED BELOW
+
+     log("reallocated image memory % and freed the previous one", strided_offset);    //reallocate to 4
+     return old_ptr;
+  }
+
