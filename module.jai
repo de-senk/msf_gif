@@ -45,9 +45,9 @@ REPLACING MALLOC:
     To facilitate integration with custom memory allocators, these calls go through macros, which can be redefined.
     The expected function signature equivalents of the macros are as follows:
 
-    void * MSF_GIF_MALLOC(void * context, size_t newSize)
-    void * MSF_GIF_REALLOC(void * context, void * oldMemory, size_t oldSize, size_t newSize)
-    void MSF_GIF_FREE(void * context, void * oldMemory, size_t oldSize)
+    void * MSF_GIF_MALLOC(void * context, msf_size_t newSize)
+    void * MSF_GIF_REALLOC(void * context, void * oldMemory, msf_size_t oldSize, msf_size_t newSize)
+    void MSF_GIF_FREE(void * context, void * oldMemory, msf_size_t oldSize)
 
     If your allocator needs a context pointer, you can set the `customAllocatorContext` field of the MsfGifState struct
     before calling msf_gif_begin(), and it will be passed to all subsequent allocator macro calls.
@@ -62,6 +62,42 @@ See end of file for license information.
 */
 
 //version 2.4
+msf_size_t :: s64;
+
+MsfGifResult :: struct {
+    data: *void;
+    dataSize: msf_size_t;
+
+    allocSize: msf_size_t; //internal use
+    contextPointer: *void; //internal use
+} ;
+
+MsfCookedFrame :: struct { //internal use
+    pixels: *u32;
+    depth, count, rbits, gbits, bbits: int;
+} ;
+
+MsfGifBuffer :: struct { //internal use
+    next: *#this; //*MsfGifBuffer
+    size: msf_size_t;
+    data: [1]u8;
+} ;
+
+MsfGifState :: struct { //internal use
+    fileWriteFunc         :  type_of(MsfGifFileWriteFunc);
+    fileWriteData         : *void;
+    previousFrame         :  MsfCookedFrame;
+    currentFrame          :  MsfCookedFrame;
+    lzwMem                : *s16;
+    tlbMem                : *u8;
+    usedMem               : *u8;
+    listHead              : *MsfGifBuffer;
+    listTail              : *MsfGifBuffer;
+    width, height         :  int;
+    customAllocatorContext: *void;
+    framesSubmitted       :  int; //needed for transparency to work correctly (because we reach into the previous frame)
+} ;
+
 #scope_module
 #import "Basic";
 bitops ::#import "Bit_Operations";
@@ -121,49 +157,16 @@ test_values: [20]int = int.[
 
 }
 */
-size_t :: s64;
 
-MsfGifResult :: struct {
-    data: *void;
-    dataSize: size_t;
 
-    allocSize: size_t; //internal use
-    contextPointer: *void; //internal use
-} ;
+// typedef msf_size_t (* MsfGifFileWriteFunc) (const void * buffer, msf_size_t size, msf_size_t count, void * stream);
+// typedef msf_size_t (* MsfGifFileWriteFunc) (const void * buffer, msf_size_t size, msf_size_t count, void * stream);
 
-MsfCookedFrame :: struct { //internal use
-    pixels: *u32;
-    depth, count, rbits, gbits, bbits: int;
-} ;
-
-MsfGifBuffer :: struct { //internal use
-    next: *#this; //*MsfGifBuffer
-    size: size_t;
-    data: [1]u8;
-} ;
-
-// typedef size_t (* MsfGifFileWriteFunc) (const void * buffer, size_t size, size_t count, void * stream);
-// typedef size_t (* MsfGifFileWriteFunc) (const void * buffer, size_t size, size_t count, void * stream);
-
-MsfGifFileWriteFunc :: (buffer: *void, size: size_t, count: size_t, stream: *void) ->  size_t {
+MsfGifFileWriteFunc :: (buffer: *void, size: msf_size_t, count: msf_size_t, stream: *void) ->  msf_size_t {
 
     return 0;
 }
 
-MsfGifState :: struct { //internal use
-    fileWriteFunc         :  type_of(MsfGifFileWriteFunc);
-    fileWriteData         : *void;
-    previousFrame         :  MsfCookedFrame;
-    currentFrame          :  MsfCookedFrame;
-    lzwMem                : *s16;
-    tlbMem                : *u8;
-    usedMem               : *u8;
-    listHead              : *MsfGifBuffer;
-    listTail              : *MsfGifBuffer;
-    width, height         :  int;
-    customAllocatorContext: *void;
-    framesSubmitted       :  int; //needed for transparency to work correctly (because we reach into the previous frame)
-} ;
 
 
 offset_of :: ($T: Type, $member: string) -> int {
@@ -175,97 +178,6 @@ offset_of :: ($T: Type, $member: string) -> int {
     return -1;
 }
 #scope_export
-
-main :: () {
-    // width := 480;
-    // height := 320;
-    centisecondsPerFrame := 10;
-    quality := 40;
-
-    handle := New(MsfGifState);
-    image_buffer1, width, height, color_stride := load_sample_image("../test_3.png");
-    image_buffer2:, width=, height=, color_stride= load_sample_image("../test_2.png");
-    image_buffer3:, width=, height=, color_stride= load_sample_image("../test_1.png");
-    // msf_gif_bgra_flag = true; //optionally, set this flag if your pixels are in BGRA format instead of RGBA
-    // msf_gif_alpha_threshold = 128; //optionally, enable transparency (see function documentation below for details)
-    msf_gif_begin  (handle=handle, width, height);
-    msf_gif_frame(handle, image_buffer1.data, centisecondsPerFrame, quality, width*color_stride);
-    msf_gif_frame(handle, image_buffer2.data, centisecondsPerFrame, quality, width*color_stride);
-    msf_gif_frame(handle, image_buffer3.data, centisecondsPerFrame, quality, width*color_stride);
-    // msf_gif_frame(handle,null, centisecondsPerFrame, quality, width/4);
-    result := msf_gif_end(handle);
-    export_to_gif("../test_p0.gif", result);
-    log("exported file");
-
-
-
-
-}
-
-  export_to_gif :: (rel_path_filename_with_extension: string, gif_result: MsfGifResult) {
-        fs :: #import "File";
-        out: string;
-        out.data = gif_result.data;
-        out.count = gif_result.dataSize;
-        success := fs.write_entire_file(rel_path_filename_with_extension, out);
-        assert(success);
-    }
-
-load_sample_image :: (filename: string) -> image_buffer: []u8, width: int, height: int, color_stride: int {
-    fs :: #import "File";
-    image :: #import "stb_image";
-
-    data_raw, success := fs.read_entire_file(filename);
-    assert(success);
-    assert(data_raw.count != 0);
-    defer free(data_raw);
-
-    width, height, nrChannels: s32;
-    img_data := image.stbi_load_from_memory(data_raw.data, xx data_raw.count, *width, *height, *nrChannels, 0);
-    assert(img_data != null, "[ERROR] img_data is null");
-    // assert(nrChannels == 4, "[ERROR] num channels is not 4, %",nrChannels);
-    log("w % h % c %", width, height, nrChannels);
-    image_buffer: []u8;
-    image_buffer.count = width * height * 4;
-    image_buffer.data = img_data;
-    color_stride := nrChannels;
-    return image_buffer, width, height, color_stride;
-}
-
-free_sample_image :: (image_buffer: []u8) {
-    image :: #import "stb_image";
-    image.stbi_image_free(image_buffer.data);
-}
-
-/*
-
-
-
-
-file, success =  file_open("temp_dir/file1.txt");
-        if !success {
-            print("Could not open file temp_dir/file1.txt for writing.\n");
-            return;
-        }
-
-        length :=  file_length(file);
-        buffer := cast(*u8) alloc(length);
-
-        success =  file_read(file, buffer, length);
-        if !success {
-            print("Could not read from temp_dir/file1.txt.\n");
-            return;
-        }
-
-        data: string;
-        data.data = buffer;
-        data.count = length;
-
-        print("Contents of temp_dir/file1.txt:\n\"%\"\n", data);
-        free(buffer);
-
-         file_close(*file);
-*/
 
 msf_gif_begin :: (handle: *MsfGifState, width: int, height: int) -> int {
     //profiler->MsfTimeFunc
@@ -347,7 +259,7 @@ msf_gif_bgra_flag := 0;
  msf_cook_frame :: (frame: *MsfCookedFrame, raw: *u8, used: *u8,
                            width: int, height: int, pitch: int, depth: int)
 {
-    log("width: %, height: %, pitch: %, depth: %", width, height, pitch, depth);
+    log("cooking frame: width: %, height: %, pitch: %, depth: %", width, height, pitch, depth);
     //for profiling ->  MsfTimeFunc
     //bit depth for each channel
     rdepthsArray: [17]int = int.[ 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 5, 5 ];
@@ -574,7 +486,6 @@ msf_lzw_reset :: inline (lzw: *MsfStridedList, tableSize: int, stride: int) {
     lzw.stride = stride;
 }
 
-g_firstvisit := true;
 //PERF TODO: is it possible to use the same array for both `used` and `tlb`?
  msf_compress_frame :: (/*jai has context already -> void * allocContext, */
                         width: int, height: int, centiSeconds: int,
@@ -630,8 +541,6 @@ g_firstvisit := true;
                 table[tableIdx].r = table[tableIdx].b;
                 table[tableIdx].b = tmp;
             }
-            if (g_firstvisit)
-                log("table[tableIdx].g1 %",table[tableIdx].g );
             tableIdx += 1;
         }
     }
@@ -847,16 +756,13 @@ msf_gif_frame :: (handle: *MsfGifState, pixelData: *u8, centiSecondsPerFrame: in
     if pitchInBytes == 0 then pitchInBytes = handle.width * 4;
     if pitchInBytes < 0 then pixelData -= pitchInBytes * (handle.height - 1);
 
-    log("\nhandle->previousFrame.count %\n", handle.previousFrame.count);
     msf_cook_frame(*handle.currentFrame, pixelData, handle.usedMem, handle.width, handle.height, pitchInBytes,
         min(quality, handle.previousFrame.depth + 160 / max(1, handle.previousFrame.count)));
 
-    log("\nhandle->previousFrame.count %\n", handle.previousFrame.count);
     buffer: *MsfGifBuffer;
     buffer = msf_compress_frame(handle.width, handle.height,
         centiSecondsPerFrame, handle.currentFrame, handle, handle.usedMem, handle.tlbMem, handle.lzwMem);
 
-    log("\nbuffer.size %\n", buffer.size);
     if !buffer {
         msf_free_gif_state(handle);
         return 0;
@@ -884,7 +790,7 @@ msf_gif_end :: (handle: *MsfGifState) -> MsfGifResult {
     if !handle.listHead return .{};
 
     //first pass: determine total size
-    total: size_t = 1; //1 byte for trailing marker
+    total: msf_size_t = 1; //1 byte for trailing marker
     start := handle.listHead;
     while start {
         total += start.size;
