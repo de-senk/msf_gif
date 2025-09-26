@@ -1,26 +1,26 @@
 // #if #exists(__IPROF)
-#load "../module.jai";
+// #load "../module.jai";
 // else
-// #import,file "../module.jai";
+#import,file "../module.jai";
 
 #import "Basic";
 
 main :: () {
     // width := 480;
     // height := 320;
-    centisecondsPerFrame := 1;
-    quality := 8;
+    centisecondsPerFrame := 3;
+    quality := 16;
 
     handle := New(MsfGifState);
     defer free(handle);
     // image_buffer1, width, height, color_stride,is_not_stb1 :=    load_sample_image("../TEST_1r.png");
-    // image_buffer1, width, height, color_stride,is_not_stb1 :=    load_sample_image("../test_p0.jpg");
-    // image_buffer2:, width=, height=, color_stride=,is_not_stb2:= load_sample_image("../test_p1.jpg");
-    // image_buffer3:, width=, height=, color_stride=,is_not_stb3:= load_sample_image("../test_p2.jpg");
+    image_buffer1, width, height, color_stride,is_not_stb1 :=    load_sample_image("../test_p0.jpg");
+    image_buffer2:, width=, height=, color_stride=,is_not_stb2:= load_sample_image("../test_p1.jpg");
+    image_buffer3:, width=, height=, color_stride=,is_not_stb3:= load_sample_image("../test_p2.jpg");
 
-    image_buffer1, width, height, color_stride,is_not_stb1 :=    load_sample_image("../TEST_1r.png");
-    image_buffer2:, width=, height=, color_stride=,is_not_stb2:= load_sample_image("../TEST_1g.png");
-    image_buffer3:, width=, height=, color_stride=,is_not_stb3:= load_sample_image("../TEST_1b.png");
+    // image_buffer1, width, height, color_stride,is_not_stb1 :=    load_sample_image("../TEST_1r.png");
+    // image_buffer2:, width=, height=, color_stride=,is_not_stb2:= load_sample_image("../TEST_1g.png");
+    // image_buffer3:, width=, height=, color_stride=,is_not_stb3:= load_sample_image("../TEST_1b.png");
     // msf_gif_bgra_flag = true; //optionally, set this flag if your pixels are in BGRA format instead of RGBA
     // msf_gif_alpha_threshold = 128; //optionally, enable transparency (see function documentation below for details)
     msf_gif_begin  (handle=handle, width, height);
@@ -30,7 +30,7 @@ main :: () {
     // msf_gif_frame(handle,null, centisecondsPerFrame, quality, width/4);
     result := msf_gif_end(handle);
     export_to_gif("../test_p0.gif", result);
-    log("exported file");
+    log("exported file /test_p0.gif");
 
     free_sample_image(image_buffer1, is_not_stb1);
     free_sample_image(image_buffer2, is_not_stb2);
