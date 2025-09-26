@@ -295,6 +295,7 @@ msf_gif_bgra_flag := 0;
         gbits:int  = gdepths[depth];
         bbits:int  = bdepths[depth];
         paletteSize:int = (1 << (rbits + gbits + bbits)) + 1;
+        // paletteSize_ptr := *paletteSize;
         memset(used, 0, paletteSize * size_of(u8));
 
         //TODO: document what this math does and why it's correct
@@ -528,9 +529,9 @@ msf_gif_bgra_flag := 0;
             // _mm_cmplt_epi32     -> pcmpgtd with operands swapped (for less than)
             // _mm_andnot_si128    -> pandn (bitwise AND-NOT)
             // _mm_storeu_si128    -> movdqu (unaligned 128-bit store)
-            dither_kernel_ptr := *ditherKernel[(y & 3) * 4];
+            // dither_kernel_ptr := *ditherKernel[(y & 3) * 4];
             #asm AVX {
-                movdqu.x xmm0:, [dither_kernel_ptr]; //k
+                movdqu.x xmm0:, [k]; //k
                 movd xmm1:, rbits; //a1 prepare
                 movdqa.x xmm2:, xmm0; //k copy into xmm2 dont override k because we will use it agai below
                 psrld.x xmm2, xmm1; //a1: k >> rbits
@@ -564,7 +565,7 @@ msf_gif_bgra_flag := 0;
             alpha_threshold := u32.[cast(u32)msf_gif_alpha_threshold, cast(u32)msf_gif_alpha_threshold,cast(u32) msf_gif_alpha_threshold, cast(u32)msf_gif_alpha_threshold].data;
 
             while x < width - 3 { defer x+=4;
-                 pixels_ptr := *raw[y * pitch + x * 4];
+                 pixels_ptr :*u8= *raw[y * pitch + x * 4];
                  #asm AVX {
                     movdqu.x xmm3, [pixels_ptr]; //xmm3 is p, xmm3 is fixed for the whole #asm block.
                     //maskara: _mm_set1_epi32(0x00FF00FF); we do this out of #asm
@@ -642,17 +643,35 @@ msf_gif_bgra_flag := 0;
                     //xmm5 is OUT, xmm4 is free now
                     //mask in transparency based on threshold
                     //NOTE: nop
+
+
                     movdqa.x xmm1, xmm3; //we copy the pixel, just in case.
-                    psrld.x xmm1, 24;
-                    movdqa.x xmm6, [alpha_threshold]; //xmm6 is now alha treshold
-                    pcmpgtd.x xmm1, xmm6;  // threshold > alpha
+                    psrld.x xmm1, 24; //xmm1 is almost
+                    movdqa.x xmm6, [alpha_threshold]; //xmm6 is done :now alha treshold
+                    pcmpgtd.x xmm1, xmm6;  //xmm1  is invAlphaMask
                     //xmm6 is free
                     //88888888888888888888888888
+    //movd + pshufd
 
-                    // pand.x xmm0, xmm1;
-                    // pandn.x xmm1, out;  // ~invAlphaMask & out
-                    // por.x out, xmm0, xmm1;
+                     //I indent this because idk
+                        // movdqa.x xmm7, xmm6; //we copy g2 into xmm7
+                        mov ecx, paletteSize; //we reuse ecx
+                        sub ecx, 1; //we subsract 1 to ecx
+                        movd xmm7, ecx; //we upload it to the simd register
+                        pshufd.x xmm6, xmm7, 0; //we broadcast it
+                    //I think the belowl line nullifies the work of the indented block above
+                    movdqu.x xmm6, [palette_minus_one];//;palette_minus_one
+                    //xmm7 is free
+                    movdqa.x xmm7, xmm1; //we copy invAlphaMask(xmm1);
+                    pand.x xmm7, xmm6; //xmm7 is somsom
+                    //xmm6 is NOT free we reuse it immidietly and we use and repalce it
+                    pandn.x xmm1, xmm5;  // invAlphaMask(xmm1) , out(xmm5)
 
+                    // por.x xmm5, xmm7, xmm1; //out(xmm5) = somsom(xmm7) ,  sasa(xmm1)
+
+
+                    //FINISHFINSISNFSFNISFSIFINSINFINFSINFINNISF
+                    //FINISHFINSISNFSFNISFSIFINSINFINFSINFINNISF
                  }
                  cooked_ptr :*u32= *cooked[y * width + x];;
                  #asm AVX{
@@ -715,7 +734,8 @@ cppversion :: #string CPP
                     sasa := _mm_andnot_si128(invAlphaMask, out);
 
                     out = _mm_or_si128(somsom, sasa);
-
+                    //FINISHFINSISNFSFNISFSIFINSINFINFSINFINNISF
+                    //FINISHFINSISNFSFNISFSIFINSINFINFSINFINNISF
                     //TODO: does storing this as a __m128i then reading it back as a u32 violate strict aliasing?
                     u32 * c = &cooked[y * width + x];
                     _mm_storeu_si128((__m128i *) c, out);
