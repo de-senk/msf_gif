@@ -311,11 +311,12 @@ msf_gif_bgra_flag := 0;
 
         // MsfTimeLoop("cook")
 
-        for y: 0 .. height - 1 {
+        for ya: 0 .. height - 1 {
+            y:= cast(s32)ya;
             x :s32= 0;
         //maybe this: https://www.codeproject.com/articles/Dither-Ordered-and-Floyd-Steinberg-Monochrome-Colo
         //I give up for now.
-            #if 1{
+            #if 0{
 
             k := *ditherKernel[(y & 3) * 4];
 
@@ -349,6 +350,16 @@ msf_gif_bgra_flag := 0;
                 }
                  continue;
             }
+
+            DEBUG_BREAK_STORE :: (val_to_insert: reg)  -> [8]u32 #expand{
+                result : [8]u32 = ---;
+                // array_resize(*watchme, 32);
+                result_ptr := result.data;
+                #asm AVX, AVX2  {
+                    movdqu.x [result_ptr], val_to_insert;
+                }
+                return result;
+            }
             pesky_simd :: (x:u32, y:u32, width: u32, raw: *u8, pitch: u32, paletteSize: u32,
                     palette_minus_one: *u32,alpha_threshold: *u32,gmask_vec: *u32,bmask_vec: *u32,
                     mask_000000FF: *u32,mask_0000FFFF: *u32,mask_00FF00FF: *u32, mask_FFFFFFFF: *u32,mask_00FFFFFF: *u32,
@@ -356,14 +367,18 @@ msf_gif_bgra_flag := 0;
 
                 ) -> s32 #expand {
 
-            idk_man:: u32.[0x0000F000];//:tagabgr? it is B G R? and alpha? no, idk what are the last rwo
+            idk_man:: u32.[0x00000F0F];//:tagabgr? it is B G R? and alpha? no, idk what are the last rwo
             pidk_man := idk_man.data;
+            idk_man2:: u32.[0x0000F000];//:tagabgr? it is B G R? and alpha? no, idk what are the last rwo
+            pidk_man2 := idk_man2.data;
+            idk_man3:: u32.[0x000000FF];//:tagabgr? it is B G R? and alpha? no, idk what are the last rwo
+            pidk_man3 := idk_man3.data;
             while x < width - 3 { defer x+=1;
                  pixels_ptr :*u8= *raw[y * pitch + x * 4];
                  cooked_ptr :*u32= *cooked[y * width + x];;
 
                 broadcast_to_brs(mask_00FF00FF);
-                broadcast_to_brs(mask_00FF00FF);
+                // broadcast_to_brs(pidk_man);
 
                 #asm AVX, AVX2 {
                     //__m128i p = _mm_loadu_si128((__m128i *) pixels);
@@ -379,9 +394,11 @@ msf_gif_bgra_flag := 0;
                     // __m128i rb2 = _mm_adds_epu16(rb1, k2);
                     paddusw.x xmm4, vk2;
                 }
+                result := DEBUG_BREAK_STORE(xmm4);
 
+                debug_break();
                 broadcast_to_brs(mask_0000FFFF);
-                broadcast_to_brs(pidk_man);
+                broadcast_to_brs(pidk_man2);
 
                 #asm AVX, AVX2 {
                     movdqa.x xmm5:, xmm4; //copy
@@ -394,7 +411,7 @@ msf_gif_bgra_flag := 0;
                         sub regular, [rbits];
                 }
 
-                PREMATURE_CHECK(xmm5, cooked_ptr);
+                // PREMATURE_CHECK(xmm5, cooked_ptr);
                 broadcast_to_brs_regular_already_filled();
 
                 #asm AVX, AVX2  {
@@ -434,6 +451,7 @@ msf_gif_bgra_flag := 0;
                 //we have vmul_g from previous
                 //brs := _mm_set1_epi32(0x000000FF)
                 broadcast_to_brs(mask_0000FFFF);
+                broadcast_to_brs(pidk_man3);
 
                  #asm AVX, AVX2  {
                     //argument := mm_srli_epi32(p, 8), _mm_set1_epi32(0x000000FF)
@@ -447,7 +465,7 @@ msf_gif_bgra_flag := 0;
                     // _mm_and_si128(argument);
                     pand.x xmm6, brs; //xmm6 is g
                 }
-
+                PREMATURE_CHECK(xmm4, cooked_ptr);
                 //_mm_adds_epu16(g1, _mm_srli_epi32(k, gbits)
                 broadcast_to_brs(gbits);
 
@@ -834,14 +852,14 @@ CPP
                     continue;
                 }
 
-                dx:int = x & 3;
-                dy:int = y & 3;
-                k:int = ditherKernel[dy * 4 + dx];
+                dx:s32 = x & 3;
+                dy:s32 = y & 3;
+                k:s32 =  ditherKernel[dy * 4 + dx];
 
 
-                a := (( min(65535, p[2] * bmul + (k >> bbits)) >> (16 - rbits - gbits - bbits))  & bmask );
-                b := (( min(65535, p[1] * gmul + (k >> gbits)) >> (16 - rbits - gbits        ))  & gmask );
-                c := (( min(65535, p[0] * rmul + (k >> rbits)) >> (16 - rbits                ))          );
+                a := (( min(65535, p[2] * cast(s32)bmul + (k >> bbits)) >> (16 - rbits - gbits - bbits))  & bmask );
+                b := (( min(65535, p[1] * cast(s32)gmul + (k >> gbits)) >> (16 - rbits - gbits        ))  & gmask );
+                c := (( min(65535, p[0] * cast(s32)rmul + (k >> rbits)) >> (16 - rbits                ))          );
                 cooked[y * width + x] =cast,trunc(u32) (a | b | c);
 
             }
