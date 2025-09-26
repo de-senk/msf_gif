@@ -283,7 +283,7 @@ msf_gif_bgra_flag := 0;
     ];
 
 
-    cooked :*u32= frame.pixels;
+    cooked :*u32= frame.pixels;// :tagabgr?
     count := 0;
     // MsfTimeLoop("do") do
     while true
@@ -291,225 +291,34 @@ msf_gif_bgra_flag := 0;
 
     //@Check -> while (count >= 256 && --depth);
 
-        rbits:int = rdepths[depth];
-        gbits:int  = gdepths[depth];
-        bbits:int  = bdepths[depth];
-        paletteSize:int = (1 << (rbits + gbits + bbits)) + 1;
+        rbits:s32 = cast(s32)rdepths[depth];
+        gbits:s32 = cast(s32)gdepths[depth];
+        bbits:s32 = cast(s32)bdepths[depth];
+        paletteSize:s32 = cast(s32)(1 << (rbits + gbits + bbits)) + 1;
         // paletteSize_ptr := *paletteSize;
         memset(used, 0, paletteSize * size_of(u8));
 
         //TODO: document what this math does and why it's correct
-        //(jai author): Do not do it, its obvious.
-        rdiff:int = (1 << (8 - rbits)) - 1;
-        gdiff:int = (1 << (8 - gbits)) - 1;
-        bdiff:int = (1 << (8 - bbits)) - 1;
-        rmul := cast(u16) ((255.0 - rdiff) / 255.0 * 257); //@Investigate(roufrouf): short is used as s16 here
-        gmul := cast(u16) ((255.0 - gdiff) / 255.0 * 257); //@Investigate(roufrouf): short is used as s16 here
-        bmul := cast(u16) ((255.0 - bdiff) / 255.0 * 257); //@Investigate(roufrouf): short is used as s16 here
+        rdiff:s32 = cast(s32)(1 << (8 - rbits)) - 1;
+        gdiff:s32 = cast(s32)(1 << (8 - gbits)) - 1;
+        bdiff:s32 = cast(s32)(1 << (8 - bbits)) - 1;
+        rmul := cast(u16) ((255.0 - rdiff) / 255.0 * 257);
+        gmul := cast(u32) ((255.0 - gdiff) / 255.0 * 257);
+        bmul := cast(u16) ((255.0 - bdiff) / 255.0 * 257);
 
-        gmask:int = ((1 << gbits) - 1) << rbits;
-        bmask:int = ((1 << bbits) - 1) << rbits << gbits;
+        gmask:s32 = cast(s32)(((1 << gbits) - 1) << rbits);
+        bmask:s32 = cast(s32)((((1 << bbits) - 1) << rbits) << gbits);
 
         // MsfTimeLoop("cook")
+
         for y: 0 .. height - 1 {
             x :s32= 0;
-
+        //maybe this: https://www.codeproject.com/articles/Dither-Ordered-and-Floyd-Steinberg-Monochrome-Colo
+        //I give up for now.
             #if 1{
 
             k := *ditherKernel[(y & 3) * 4];
-            // #asm AVX {
-            //     movdqu.y loaded_in_reg:, [k];
-            //     movdqu.y ssec:, [ssec_ptr];
-            // }
-            // Translation of SSE2 intrinsics to Jai #asm blocks
-            // Original intrinsics -> Assembly mnemonics mapping:
-            //
-            // _mm_loadu_si128     -> movdqu (unaligned 128-bit load)
-            // _mm_or_si128        -> por (bitwise OR of packed integers)
-            // _mm_srli_epi32      -> psrld (shift right logical doublewords)
-            // _mm_slli_epi32      -> pslld (shift left logical doublewords)
-            // _mm_and_si128       -> pand (bitwise AND)
-            // _mm_set1_epi32      -> broadcast or movd + pshufd
-            // _mm_set_epi16       -> manual setup with movd/pinsrw or memory load
-            // _mm_mullo_epi16     -> pmullw (multiply low words)
-            // _mm_adds_epu16      -> paddusw (add with unsigned saturation)
-            // _mm_cmplt_epi32     -> pcmpgtd with operands swapped (for less than)
-            // _mm_andnot_si128    -> pandn (bitwise AND-NOT)
-            // _mm_storeu_si128    -> movdqu (unaligned 128-bit store)
 
-            ColorQuantizeSSE2 :: (raw: *u8, cooked: *u32, width: s32, height: s32, pitch: s32,
-                                  rmul: u16, gmul: u16, bmul: u16,
-                                  rbits: *u32, gbits: *u32, bbits: *u32,
-                                   gmask: u32, bmask: u32,
-                                  palette_minus_one: *u32, msf_gif_alpha_threshold: u32,
-                                  ditherKernel: *s32) -> s32
-            {
-                assert(raw!=null);
-                assert(cooked!=null);
-                assert(ditherKernel!=null);
-                y := 0; // Assuming we're processing one row, adjust as needed
-                x :s32= 0;
-
-                // Setup constants in memory (these could be global constants)
-                mask_00FF00FF := u32.[0x00FF00FF, 0x00FF00FF, 0x00FF00FF, 0x00FF00FF].data;
-                mask_000000FF := u32.[0x000000FF, 0x000000FF, 0x000000FF, 0x000000FF].data;
-                mask_0000FFFF := u32.[0x0000FFFF, 0x0000FFFF, 0x0000FFFF, 0x0000FFFF].data;
-
-                // Pack multipliers for SIMD
-                mul_rb := u16.[rmul, bmul, rmul, bmul, rmul, bmul, rmul, bmul].data;
-                mul_g  := u32.[gmul, gmul, gmul, gmul].data;
-
-                bmask_vec := u32.[bmask, bmask, bmask, bmask].data;
-                gmask_vec := u32.[gmask, gmask, gmask, gmask].data;
-
-
-                alpha_threshold := u32.[msf_gif_alpha_threshold, msf_gif_alpha_threshold, msf_gif_alpha_threshold, msf_gif_alpha_threshold].data;
-
-                #asm SSE2
-                {
-                    // Load dither kernel for current row: k = ditherKernel[(y & 3) * 4]
-                    // mov y:, y;
-                    and y, 3;              // y & 3
-                    shl y, 4;              // * 16 bytes (4 ints * 4 bytes)
-                    movdqu.x xmm0:, [ditherKernel + y];  // k = _mm_loadu_si128
-
-                    // Prepare k2 = (k >> rbits) | ((k >> bbits) << 16)
-                    movdqa.x k2:, xmm0;
-                    movdqa.x tmp:, xmm0;
-                    psrld.x k2, [rbits];       // k >> rbits
-                    psrld.x tmp, [bbits];     // k >> bbits
-                    pslld.x tmp, 16;        // << 16
-                    por.x k2, tmp;          // OR them together
-                }
-
-                while x < width - 3
-                {
-                    pixels_ptr := raw + (y * pitch + x * 4);
-                    cooked_ptr := cooked + (y * width + x);
-
-                    #asm AVX
-                    {
-                        // Load 4 pixels (RGBA, 4 bytes each = 16 bytes total)
-                        movdqu.x p:, [pixels_ptr];  // p = _mm_loadu_si128
-
-                        // Extract red and blue channels: rb = p & 0x00FF00FF
-                        movdqa.x rb:, p;
-                        pand.x rb, [mask_00FF00FF];
-                    // }
-                    //     #asm AVX
-                    // {
-                        // Multiply red and blue by their multipliers
-                        // rb1 = rb * [rmul, bmul, rmul, bmul, ...]
-                        pmullw.x rb1:, rb, [mul_rb];  // _mm_mullo_epi16
-                         // Add dither with saturation: rb2 = rb1 + k2
-                        paddusw.x rb2:, rb1, k2;  // _mm_adds_epu16
-
-                    // }
-                    //    #asm SSE2
-                    // {
-
-                        // Extract final red values
-                        // r3 = (rb2 & 0x0000FFFF) >> (16 - rbits)
-                        movdqa.x r3:, rb2;
-                        pand.x r3, [mask_0000FFFF];
-                        mov ecx:, 16;
-                        sub ecx, [rbits];
-                        movd xmm0, ecx;
-                        psrld.x r3, xmm0;//ecx
-
-                        // Extract final blue values
-                        // b3 = (rb2 >> (32 - rbits - gbits - bbits)) & bmask
-                        movdqa.x b3:, rb2;
-                        mov ecx, 32;
-                        sub ecx, [rbits];
-                        sub ecx, [gbits];
-                        sub ecx, [bbits];
-                        movd xmm0, ecx;
-                        psrld.x b3, xmm0;//ecx
-
-                        pand.x b3, [bmask_vec];
-
-                        // Extract and process green channel
-                        // g = (p >> 8) & 0x000000FF
-                        movdqa.x g:, p;
-                        psrld.x g, 8;
-                        pand.x g, [mask_000000FF];
-                   //  }
-                   //       #asm AVX
-                   //  {
-                        // g1 = g * gmul
-                        pmullw.x g1:, g, [mul_g];  // Note: might need pmulld for 32-bit
-                   //  }
-                   //   #asm SSE2
-                   //  {
-                        // g2 = g1 + (k >> gbits)
-                        movdqa.x k_shifted:, xmm0;
-                        psrld.x k_shifted, [gbits]; //gbits
-                   //  }
-                   //   #asm AVX
-                   //  {
-                        paddusw.x g2:, g1, k_shifted;
-                   //  }
-                   //  #asm SSE2
-                   //  {
-                        // g3 = (g2 >> (16 - rbits - gbits)) & gmask
-                        movdqa.x g3:, g2;
-                        mov ecx, 16;
-                        sub ecx, rbits;
-                        sub ecx, gbits;
-                        movd xmm0, ecx;
-                        psrld.x g3, xmm0; //ecx
-                        pand.x g3, [gmask_vec];
-                   //  }
-                   //     #asm AVX
-                   //  {
-                        // Combine channels: out = r3 | g3 | b3
-                        por.x out:, r3, g3;
-                        por.x out, b3;
-                   //  }
-                   //     #asm SSE2
-                   //  {
-                        // Alpha threshold check
-                        // invAlphaMask = (p >> 24) < alpha_threshold
-                        movdqa.x alpha:, p;
-                        psrld.x alpha, 24;
-
-                        // For signed comparison of unsigned values, we need to flip sign bit
-                        // or use a different approach. Here we'll use pcmpgtd backwards
-                        movdqa.x threshold:, [alpha_threshold];
-
-                   //  }   #asm AVX
-                   //  {//invAlphaMask xmm1
-                        pcmpgtd.x xmm1:, threshold, alpha;  // threshold > alpha
-                   //  }
-                   //  #asm SSE2
-                   //  {
-                        // Conditional select based on alpha
-                        // out = (invAlphaMask & (paletteSize-1)) | (~invAlphaMask & out)
-
-                        // movdqa.x xmm0, [palette_minus_one]; //xmm0 is palette_val
-                        pand.x xmm0, xmm1;
-                        pandn.x xmm1, out;  // ~invAlphaMask & out
-
-                   //      }
-                   // #asm AVX
-                   //  {
-                        por.x out, xmm0, xmm1;
-                   //  }
-                   //   #asm SSE2
-                   //  {
-                        // Store result
-                        movdqu.x [cooked_ptr], out;  // _mm_storeu_si128
-                    }
-
-                    x += 4;
-                }
-
-                return x;
-                // Handle remaining pixels with scalar code
-                // ...
-            }
-            palette_minus_one := u32.[paletteSize.(u32) - 1, paletteSize.(u32) - 1, paletteSize.(u32) - 1, paletteSize.(u32) - 1].data;
             // x = ColorQuantizeSSE2(raw, cooked,cast(s32) width, cast(s32)height, cast(s32)pitch,
             //                       rmul, gmul, bmul,
             //                       cast(*u32)*rbits, cast(*u32)*gbits, cast(*u32)*bbits,
@@ -530,14 +339,275 @@ msf_gif_bgra_flag := 0;
             // _mm_andnot_si128    -> pandn (bitwise AND-NOT)
             // _mm_storeu_si128    -> movdqu (unaligned 128-bit store)
             // dither_kernel_ptr := *ditherKernel[(y & 3) * 4];
+
+            reg::__reg;
+
+            PREMATURE_CHECK :: (val_to_insert: reg, ptr: *u32) #expand {
+                #asm AVX, AVX2  {
+                    movdqa.x OUT, val_to_insert;
+                    movdqu.x [ptr], OUT;
+                }
+                 continue;
+            }
+            pesky_simd :: (x:u32, y:u32, width: u32, raw: *u8, pitch: u32, paletteSize: u32,
+                    palette_minus_one: *u32,alpha_threshold: *u32,gmask_vec: *u32,bmask_vec: *u32,
+                    mask_000000FF: *u32,mask_0000FFFF: *u32,mask_00FF00FF: *u32, mask_FFFFFFFF: *u32,mask_00FFFFFF: *u32,
+                    rbits: *u32, bbits: *u32, gbits: *u32, cooked: *u32
+
+                ) -> s32 #expand {
+
+            idk_man:: u32.[0x0000F000];//:tagabgr? it is B G R? and alpha? no, idk what are the last rwo
+            pidk_man := idk_man.data;
+            while x < width - 3 { defer x+=1;
+                 pixels_ptr :*u8= *raw[y * pitch + x * 4];
+                 cooked_ptr :*u32= *cooked[y * width + x];;
+
+                broadcast_to_brs(mask_00FF00FF);
+                broadcast_to_brs(mask_00FF00FF);
+
+                #asm AVX, AVX2 {
+                    //__m128i p = _mm_loadu_si128((__m128i *) pixels);
+                    movdqu.x p:, [pixels_ptr];  //p is p, p is fixed for the whole #asm block.
+
+                    //__m128i rb = _mm_and_si128(p, _mm_set1_epi32(0x00FF00FF));
+                    pand.x xmm4:, p, brs; //xmm4 is rb
+
+                    //argument := rb, _mm_set_epi16(bmul, rmul, bmul, rmul, bmul, rmul, bmul, rmul))
+                    //__m128i rb1 = _mm_mullo_epi16(argument));
+                    pmullw.x xmm4, vmul_rb; //@Check should it be red blue or blue red? little endian
+
+                    // __m128i rb2 = _mm_adds_epu16(rb1, k2);
+                    paddusw.x xmm4, vk2;
+                }
+
+                broadcast_to_brs(mask_0000FFFF);
+                broadcast_to_brs(pidk_man);
+
+                #asm AVX, AVX2 {
+                    movdqa.x xmm5:, xmm4; //copy
+                    //_mm_and_si128(rb2, _mm_set1_epi32(0x0000FFFF))
+                    pand.x xmm5, brs;
+                }
+
+                #asm AVX, AVX2 {
+                        mov regular, 16;
+                        sub regular, [rbits];
+                }
+
+                PREMATURE_CHECK(xmm5, cooked_ptr);
+                broadcast_to_brs_regular_already_filled();
+
+                #asm AVX, AVX2  {
+                    // argument := (_mm_and_si128(rb2, _mm_set1_epi32(0x0000FFFF)), 16 - rbits)
+                    // argument := (xmm5, 16 - rbits)
+                    // argument := (xmm5, brs)
+
+                    // __m128i r3 = _mm_srli_epi32(argument);
+                    psrld.x xmm5, brs; //xmm5==r3
+                }
+
+                #asm AVX, AVX2 {
+                        mov regular, 32;
+                        sub regular, [rbits];
+                        sub regular, [gbits];
+                        sub regular, [bbits];
+                }
+
+                broadcast_to_brs_regular_already_filled();
+
+                #asm AVX, AVX2
+                {
+                    //argument :=_mm_srli_epi32(rb2, 32 - rbits - gbits - bbits), _mm_set1_epi32(bmask)
+                    //__m128i b3 = _mm_and_si128(argument);
+
+                    //_mm_srli_epi32(rb2, 32 - rbits - gbits - bbits)
+                    psrld.x xmm4, brs;
+                }
+
+                broadcast_to_brs(bmask_vec);
+
+                 #asm AVX, AVX2  {
+                    //__m128i b3 = _mm_and_si128(argument);
+                    pand.x xmm4, brs;//xmm4 is b3 now
+                }
+
+                //we have vmul_g from previous
+                //brs := _mm_set1_epi32(0x000000FF)
+                broadcast_to_brs(mask_0000FFFF);
+
+                 #asm AVX, AVX2  {
+                    //argument := mm_srli_epi32(p, 8), _mm_set1_epi32(0x000000FF)
+                    //argument := xmm6, brs
+                    //__m128i g = _mm_and_si128(argument);
+
+                    //mm_srli_epi32(p, 8)
+                    movdqa.x xmm6:, p; //we copy p that is the pixel
+                    psrld.x xmm6, 8; // >> 8
+
+                    // _mm_and_si128(argument);
+                    pand.x xmm6, brs; //xmm6 is g
+                }
+
+                //_mm_adds_epu16(g1, _mm_srli_epi32(k, gbits)
+                broadcast_to_brs(gbits);
+
+                #asm AVX, AVX2  {
+                    //g1 := _mm_mullo_epi16(g, _mm_set1_epi32(gmul));
+                    pmullw.x xmm6, vmul_g;
+
+                    movdqa.x xmm7:, vk; //we copy k into xmm7
+                    // _mm_srli_epi32(k, gbits));
+                    psrld.x xmm7, brs; //>>gbits
+
+                    //_mm_adds_epu16(g1, _mm_srli_epi32(k, gbits));
+                    // g2 := _mm_adds_epu16(xmm6, xmm7);
+                    paddusw.x xmm6, xmm7; //g2
+
+                }
+
+                #asm AVX, AVX2  {
+
+                        mov regular, 16; //we reuse regular
+                        sub regular, [rbits];
+                        sub regular, [gbits];
+                }
+
+                //brs = 16 - rbits - gbits
+                broadcast_to_brs_regular_already_filled();
+
+                #asm AVX, AVX2  {
+                    ///_mm_srli_epi32(g2, 16 - rbits - gbits)
+                    psrld.x xmm6, brs; //we reuse xmm6 that is g2, and we shift it too
+                }
+
+
+                //brs := _mm_set1_epi32(gmask)
+                 broadcast_to_brs(gmask_vec);
+
+                 #asm AVX, AVX2  {
+                 //__m128i g3 = _mm_and_si128(_mm_srli_epi32(g2, 16 - rbits - gbits), _mm_set1_epi32(gmask));
+                 //__m128i g3 = _mm_and_si128(argument);
+                 //argument := _mm_srli_epi32(g2, 16 - rbits - gbits), _mm_set1_epi32(gmask)
+                 //argument := _mm_srli_epi32(xmm6, brs)
+                    pand.x xmm6, brs; //g3
+                }
+
+                #asm AVX, AVX2  {
+                    por.x xmm5, xmm6; //r3 or'ed with  g3
+                    //__m128i out = _mm_or_si128(_mm_or_si128(r3, g3), b3);
+                    por.x xmm5, xmm4; //     br=xmm4
+                    //mask in transparency based on threshold
+                    }
+
+
+
+                #asm AVX, AVX2  {
+                // __m128i invAlphaMask = _mm_cmplt_epi32(_mm_srli_epi32(p, 24), _mm_set1_epi32(msf_gif_alpha_threshold));
+                // __m128i invAlphaMask = _mm_cmplt_epi32(argument);
+                //argument:=_mm_srli_epi32(p, 24), _mm_set1_epi32(msf_gif_alpha_threshold)
+
+                    //_mm_srli_epi32(p, 24)
+                    movdqa.x xmm1:, p; //we copy the pixel, just in case.
+                    psrld.x xmm1, 24; //xmm1 is almost
+                //argument:=xmm1, _mm_set1_epi32(msf_gif_alpha_threshold)
+                }
+
+
+                 #if 1 {
+
+                //brs := _mm_set1_epi32(msf_gif_alpha_threshold)
+                 broadcast_to_brs(alpha_threshold);
+                #asm AVX, AVX2  {
+                //pcmpgtd
+                //argument:=xmm1, brs
+                    pcmpgtd.x xmm1, brs;  //xmm1  is invAlphaMask
+
+                }
+
+                #asm AVX, AVX2  {
+                        mov regular, paletteSize;
+                        sub regular, 1;
+                }
+                //brs := _mm_set1_epi32(paletteSize - 1)
+                 broadcast_to_brs_regular_already_filled();
+
+
+                #asm AVX, AVX2  {
+                  //out = _mm_or_si128(_mm_and_si128(invAlphaMask, _mm_set1_epi32(paletteSize - 1)), _mm_andnot_si128(invAlphaMask, out));
+                  //out = _mm_or_si128(_mm_and_si128(xmm1, brs), _mm_andnot_si128(xmm1, out));
+                //out = _mm_or_si128(argument);
+                //argument := _mm_and_si128(xmm1, brs), _mm_andnot_si128(xmm1, out));
+                //xmm5 is out
+                    movdqa.x xmm6, brs; //copy brs
+                }
+                  broadcast_to_brs(palette_minus_one);
+
+
+                 #asm AVX, AVX2  {
+                    // movdqa.x xmm6, xmm1;
+                    //xmm6 is saved brs ===_mm_set1_epi32(paletteSize - 1)
+
+                    // and actual brs is palette_minus_one
+                    pand.x xmm6, brs; //_mm_and_si128(invAlphaMask, _mm_set1_epi32(paletteSize - 1)
+                    pandn.x xmm1, xmm5;  //_mm_andnot_si128(invAlphaMask, out)  === invAlphaMask(xmm1) , out(xmm5)
+                    //now out = _mm_or_si128(argument); === _mm_or_si128(xmm6, xmm1);
+
+
+                    //out = _mm_or_si128(_mm_and_si128(invAlphaMask, _mm_set1_epi32(paletteSize - 1)), _mm_andnot_si128(invAlphaMask, out));
+
+                    por.x xmm6, xmm1;  // xmm7 = xmm7 OR xmm1
+                    //out === xmm6;
+
+                    movdqa.x xmm5, xmm6;
+                    movdqa.x OUT, xmm5;
+                    // movdqa.x xmm5, xmm7; // then move result to xmm5
+                    // por.x xmm5, xmm7, xmm1; //out(xmm5) = somsom(xmm7) ,  sasa(xmm1)
+
+
+                 }
+
+                 } //#if 0 or 1
+                 #asm AVX, AVX2 {
+
+                    movdqu.x [cooked_ptr], OUT;  // _mm_storeu_si128
+                 }
+                 // x+=4;//by 4? can I do by 8? Im such and idiont! there was a defer above doing ths!!
+                 }
+           return cast(s32)x;
+         }; //end procedure pesky_simd
+
+             broadcast_to_brs::(ptr_to_scalar: *u32) #expand {
+                #asm AVX, AVX2 {
+                mov  regular, [ptr_to_scalar];
+                movd brs, regular;
+                pshufd.x brs, brs, 0;
+                }
+             }
+
+              broadcast_to_brs_regular_already_filled :: () #expand {
+                #asm AVX, AVX2 {
+                    movd brs, regular;
+                    pshufd.x brs, brs, 0;
+                }
+             }
+
+            fill_vk_and_vk2 :: (vk: reg, vk2: reg, k: *s32) #expand {
             #asm AVX {
-                movdqu.x xmm0:, [k]; //k
+                /*
+                        __m128i k = _mm_loadu_si128((__m128i *) &ditherKernel[(y & 3) * 4]);
+                    a1: := _mm_srli_epi32(k, rbits);
+                    a2: := _mm_srli_epi32(k, bbits);
+                    a3: := _mm_slli_epi32(a2, 16);
+                    __m128i k2 = _mm_or_si128(a1, a3);
+
+                */
+                movdqu.x vk, [k]; //k
                 movd xmm1:, rbits; //a1 prepare
-                movdqa.x xmm2:, xmm0; //k copy into xmm2 dont override k because we will use it agai below
-                psrld.x xmm2, xmm1; //a1: k >> rbits
+                movdqa.x vk2, vk; //k copy into xmm2 dont override k because we will use it agai below
+                psrld.x vk2, xmm1; //a1: k >> rbits
                 //xmm1 is free, xmm2 is a1
                 movd xmm1, bbits; //a2 prepare
-                movdqa.x xmm3:, xmm0; //copy of k
+                movdqa.x xmm3:, vk; //copy of k
                 pslld.x xmm3, xmm1; //a2: k << bbits; LEFT!
                 //xmm1 is free, xmm3 is a2
 
@@ -545,141 +615,72 @@ msf_gif_bgra_flag := 0;
                 //we use a2(xmm3) itself to store a3
                 psrld.x xmm3, 16; //  a2 >> 16;
                 //xmm3 is a3 now
-                por.x xmm2, xmm3; //a1 OR a3
+                por.x vk2, xmm3; //a1 OR a3
 
 
                 //we will never replace xmm0 and xmm2 from now on
                 //xmm0 is k, xmm2 is k2, xmm1 is free xmm3 is free
             };
+            }
 
-            mask_00FF00FF := u32.[0x00FF00FF, 0x00FF00FF, 0x00FF00FF, 0x00FF00FF].data;
-            mask_0000FFFF := u32.[0x0000FFFF, 0x0000FFFF, 0x0000FFFF, 0x0000FFFF].data;
-            mask_000000FF := u32.[0x000000FF, 0x000000FF, 0x000000FF, 0x000000FF].data;
+            palette_minus_one := u32.[paletteSize.(u32) - 1, paletteSize.(u32) - 1, paletteSize.(u32) - 1, paletteSize.(u32) - 1].data;
 
-            mul_rb := u16.[rmul, bmul, rmul, bmul, rmul, bmul, rmul, bmul].data;
-            mul_g  := u32.[gmul, gmul, gmul, gmul].data;
+            mask_00FF00FF := u32.[0x00FF00FF].data;
+            mask_000000FF := u32.[0x000000FF].data;
+            mask_0000FFFF := u32.[0x0000FFFF].data;
+            mask_00FFFFFF := u32.[0x00FFFFFF].data;
+            mask_FFFFFFFF := u32.[0xFFFFFFFF].data;
+
+            mul_rb := u16.[rmul, bmul, rmul, bmul, rmul, bmul, rmul, bmul,  rmul, bmul, rmul, bmul, rmul, bmul, rmul, bmul   ,  rmul, bmul, rmul, bmul, rmul, bmul, rmul, bmul].data;
+            mul_g  := u32.[gmul, gmul, gmul, gmul,gmul, gmul, gmul, gmul,   gmul, gmul, gmul, gmul,gmul, gmul, gmul, gmul].data;
 
             bmask_vec := u32.[cast(u32)bmask, cast(u32)bmask, cast(u32)bmask, cast(u32)bmask].data;
             gmask_vec := u32.[cast(u32)gmask, cast(u32)gmask, cast(u32)gmask, cast(u32)gmask].data;
 
             alpha_threshold := u32.[cast(u32)msf_gif_alpha_threshold, cast(u32)msf_gif_alpha_threshold,cast(u32) msf_gif_alpha_threshold, cast(u32)msf_gif_alpha_threshold].data;
-
-            while x < width - 3 { defer x+=4;
-                 pixels_ptr :*u8= *raw[y * pitch + x * 4];
-                 #asm AVX {
-                    movdqu.x xmm3, [pixels_ptr]; //xmm3 is p, xmm3 is fixed for the whole #asm block.
-                    //maskara: _mm_set1_epi32(0x00FF00FF); we do this out of #asm
-                    pand.x xmm4:, [mask_00FF00FF]; //xmm4 is rb
-                    //111111111111111111111111111111
-                    pmullw.x xmm5:, xmm4, [mul_rb];  // xmm5 is rb1
-                    //xmm4 is free now
-                    paddusw.x xmm4, xmm5, xmm2;  // xmm2 is k2, xmm4 is rb2 now
-                    //xmm5 is free now
-                    pand.x xmm5, [mask_0000FFFF]; //xmm5 is rb3
-                    //22222222222222222222222222222
-
-                    //I indent this because idk
-                        mov ecx:, 16;
-                        sub ecx, rbits;
-                        movd xmm6:, ecx;
-                    //xmm6 is loaded with (16 - rbits)
-
-                    psrld.x xmm5, xmm6; //xmm5 is r3: is rb3 shifyed by  (16 - rbits)
-                    //xmm5 WILL be used near the end after //7777 , so we are stuck with it and cant reuse it.
-                    //xmm6 is free now
-
-                    //I indent this because idk
-                        mov ecx, 32; //we reuse ecx
-                        sub ecx, rbits;
-                        sub ecx, gbits;
-                        sub ecx, bbits;
-                        movd xmm6, ecx;  //xmm6 is 32 - rbits - gbits - bbits
-                    //finally we can use xmm4 that is rb2
-                    psrld.x xmm4, xmm6; // shift right (rb2, 32 - rbits - gbits - bbits)
-                    //xmm6 is free now
-                    //xmm4 is somsom
-                    pand.x xmm4, [bmask_vec]; //xmm4 is b3 now
-                    //we use b3 at the end D:
-                    //so far we are stuck with xmm3 xmm4 xmm5 (xmm0 xmm2 xmm2 from outside the while loop)
-                    //333333333333333333333333333
-                    movdqa.x xmm6, xmm3; //we copy xmm3 that is the pixel
-                    psrld.x xmm6, 8; // >> 8
-                    pand.x xmm6, [mask_000000FF]; //xmm6 is g
-                    //444444444444444444444444444
-                    pmullw.x xmm6, [mul_g]; // xmm6 is g1 now
-                    //5555555555555555
-                    //we finnaly use k again from outsid ethe while loop, xmm0 is k
-                    movdqa.x xmm7:, xmm0; //we copy k into xmm7
-
-                    //I indent this because idk
-                        mov ecx, gbits; //we reuse ecx
-                        movd xmm1, ecx;  //xmm1 is gbits
-
-                    psrld.x xmm7, xmm1; //>>gbits
-                    paddusw.x xmm6, xmm7; //we add to g1 the shifted k xmm7, we reuse g1 tho.
-                    //xmm7 is free now
-                    //xmm6 is g2 now
-                    //666666666666666
-                    //I indent this because idk
-                        // movdqa.x xmm7, xmm6; //we copy g2 into xmm7
-                        mov ecx, 16; //we reuse ecx
-                        sub ecx, rbits;
-                        sub ecx, gbits;
-                        movd xmm7, ecx; //( 16 - rbits - gbits)
-                        psrld.x xmm6, xmm7; //we reuse xmm6 that is g2, and we shift it too
-                    //emm idk what to comment anymore  (ecx is xmm7 but is free now )
-                    //xmm7 is free now
-                    //xmm6 is mule now
-                    pand.x xmm6, [gmask_vec]; //AND (mule, mask_vec)
-                    //xmm6 is g3 now
-                    //7777777777777777
-                    //finally we use r3(xmm5) and b3(xmm4)
-                    //recap, xmm0 is k, xmm2 is k2, xmm1 is... oh wait, xmm1 is free I think, not anymore, I used it. well its free anyways
-                    //xmm3 is the pixel, xmm4 is b3 xmm5 is r3 xmm6 is g3
-                    //ahh, is this normal programming?
-                    por.x xmm5, xmm6; //r3 OR g3
-                    //xmm5 is ohoh, xmm6 is free, xmm1 is free
-                    por.x xmm5, xmm4;
-                    //xmm5 is OUT, xmm4 is free now
-                    //mask in transparency based on threshold
-                    //NOTE: nop
+            #asm AVX, AVX2 {
+                vk: vec;
+                vk2: vec;
+                vmul_rb: vec;
+                vmul_g: vec;
+                brs: vec; //for broadcasting
+                regular:gpr; //for broadcasting
+                OUT: vec; //unused yet
 
 
-                    movdqa.x xmm1, xmm3; //we copy the pixel, just in case.
-                    psrld.x xmm1, 24; //xmm1 is almost
-                    movdqa.x xmm6, [alpha_threshold]; //xmm6 is done :now alha treshold
-                    pcmpgtd.x xmm1, xmm6;  //xmm1  is invAlphaMask
-                    //xmm6 is free
-                    //88888888888888888888888888
-    //movd + pshufd
 
-                     //I indent this because idk
-                        // movdqa.x xmm7, xmm6; //we copy g2 into xmm7
-                        mov ecx, paletteSize; //we reuse ecx
-                        sub ecx, 1; //we subsract 1 to ecx
-                        movd xmm7, ecx; //we upload it to the simd register
-                        pshufd.x xmm6, xmm7, 0; //we broadcast it
-                    //I think the belowl line nullifies the work of the indented block above
-                    movdqu.x xmm6, [palette_minus_one];//;palette_minus_one
-                    //xmm7 is free
-                    movdqa.x xmm7, xmm1; //we copy invAlphaMask(xmm1);
-                    pand.x xmm7, xmm6; //xmm7 is somsom
-                    //xmm6 is NOT free we reuse it immidietly and we use and repalce it
-                    pandn.x xmm1, xmm5;  // invAlphaMask(xmm1) , out(xmm5)
-
-                    // por.x xmm5, xmm7, xmm1; //out(xmm5) = somsom(xmm7) ,  sasa(xmm1)
-
-
-                    //FINISHFINSISNFSFNISFSIFINSINFINFSINFINNISF
-                    //FINISHFINSISNFSFNISFSIFINSINFINFSINFINNISF
-                 }
-                 cooked_ptr :*u32= *cooked[y * width + x];;
-                 #asm AVX{
-
-                    movdqu.x [cooked_ptr], xmm5;  // _mm_storeu_si128
-                 }
-                 x+=4;//by 4? can I do by 8?
             }
+
+            broadcast_to_brs(mul_g);
+
+            #asm AVX, AVX2 {
+                // broadcastss.x br, [mul_g];
+                // mov  regular, [mul_g];
+                // movd brs, regular;
+                // pshufd.x brs, brs, 0;
+                movdqa.x vmul_g, brs;
+            }
+
+            broadcast_to_brs(cast,force (*u32)mul_rb);
+
+            #asm AVX, AVX2 {
+                // broadcastss.x br, [mul_rb];
+                // mov  regular, [mul_rb];
+                // movd brs, regular;
+                // pshufd.x brs, brs, 0;
+                movdqu.x vmul_rb, brs;
+            }
+
+            fill_vk_and_vk2(vk, vk2, k);
+            x = pesky_simd(x.(u32),y.(u32),width.(u32),raw,pitch.(u32),paletteSize.(u32),
+                palette_minus_one,alpha_threshold,gmask_vec,bmask_vec,
+                mask_000000FF, mask_0000FFFF, mask_00FF00FF, mask_FFFFFFFF, mask_00FFFFFF,
+                    *rbits.(u32), *bbits.(u32), *gbits.(u32), cooked
+                    // ,                    vk, vk2
+                    );
+
+
+
 cppversion :: #string CPP
                __m128i k = _mm_loadu_si128((__m128i *) &ditherKernel[(y & 3) * 4]);
                 a1: := _mm_srli_epi32(k, rbits);
@@ -783,36 +784,36 @@ CPP
 
                 // for (; x < width - 3; x += 4) {
                     // for (int i = 0; i < 4; ++i) {
-                ax:=0;
-                while ax<width-3 {
-                defer ax += 4;
+                // x:=0;
+                // while x<width-3 {
+                // defer x += 4;
 
-                    i:= 0;
-                    while i<4 {
-                    defer i += 1;
+                //     i:= 0;
+                //     while i<4 {
+                //     defer i += 1;
 
-                        pixels :*u8= *raw[y * pitch + (x + i) * 4];
+                //         pixels :*u8= *raw[y * pitch + (x + i) * 4];
 
-                        /* transparency */
-                        if (pixels[3] < msf_gif_alpha_threshold) {
-                            cooked[y * width + x + i] =cast(u32) paletteSize - 1;
-                            continue;
-                        }
+                //         /* transparency */
+                //         if (pixels[3] < msf_gif_alpha_threshold) {
+                //             cooked[y * width + x + i] =cast(u32) paletteSize - 1;
+                //             continue;
+                //         }
 
-                        dx: int = (x + i) & 3;
-                        k: int = ditherKernel[(y & 3) * 4 + dx];
+                //         dx: int = (x + i) & 3;
+                //         k: int = ditherKernel[(y & 3) * 4 + dx];
 
-                        /* use same math as scalar cleanup (keep min semantics) */
-                        part_b:int = ( min(65535, pixels[2] * bmul + (k >> bbits))
-                                       >> (16 - rbits - gbits - bbits) ) & bmask;
-                        part_g:int = ( min(65535, pixels[1] * gmul + (k >> gbits))
-                                       >> (16 - rbits - gbits) ) & gmask;
-                        part_r:int =   min(65535, pixels[0] * rmul + (k >> rbits))
-                                       >> (16 - rbits);
+                //         /* use same math as scalar cleanup (keep min semantics) */
+                //         part_b:int = ( min(65535, pixels[2] * bmul + (k >> bbits))
+                //                        >> (16 - rbits - gbits - bbits) ) & bmask;
+                //         part_g:int = ( min(65535, pixels[1] * gmul + (k >> gbits))
+                //                        >> (16 - rbits - gbits) ) & gmask;
+                //         part_r:int =   min(65535, pixels[0] * rmul + (k >> rbits))
+                //                        >> (16 - rbits);
 
-                        cooked[y * width + x + i] = cast(u32)(part_b | part_g | part_r);
-                    }
-                }
+                //         cooked[y * width + x + i] = cast(u32)(part_b | part_g | part_r);
+                //     }
+                // }
 
 
             }
@@ -844,8 +845,41 @@ CPP
                 cooked[y * width + x] =cast,trunc(u32) (a | b | c);
 
             }
+            #if 0 //force anti simd
+            {
+            x= 0;
+            while x<width {
+                defer x += 1;
+                defer curr_iters += 1;
+                assert(curr_iters < MAX_ITERS,"MAX_ITERS %, width%", x,  width);
+                    //uint8_t * p = &raw[y * pitch + x * 4];
+                     p : *u8= *raw[y * pitch + x * 4];
+
+                    //transparent pixel if alpha is low
+                    if (p[3] < msf_gif_alpha_threshold) {
+                        cooked[y * width + x] = cast(u32) (paletteSize - 1);
+                        log("ASD");
+                        continue;
+                    }
+
+                    dx:int = x & 3;
+                    dy:int = y & 3;
+                    k:int = ditherKernel[dy * 4 + dx];
+
+
+                    a := (( min(65535, p[2] * bmul + (k >> bbits)) >> (16 - rbits - gbits - bbits))  & bmask );
+                    b := (( min(65535, p[1] * gmul + (k >> gbits)) >> (16 - rbits - gbits        ))  & gmask );
+                    c := (( min(65535, p[0] * rmul + (k >> rbits)) >> (16 - rbits                ))          );
+                    cooked[y * width + x] =cast,trunc(u32) (a | b | c);
+
+                }
+
+
+
+            }
 
         }
+
 
         count = 0;
         // MsfTimeLoop("mark")
