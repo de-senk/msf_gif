@@ -1,37 +1,47 @@
-// #if #exists(__IPROF)
-// #load "../module.jai";
-// else
-#import,file "../module.jai";
+#load "../module.jai";
 
 #import "Basic";
 
 main :: () {
-    // width := 480;
-    // height := 320;
-    centisecondsPerFrame := 3;
-    quality := 16;
+    centisecondsPerFrame := 3; //speed of gif,
+    quality := 16; //quality of gif
 
     handle := New(MsfGifState);
     defer free(handle);
-    // image_buffer1, width, height, color_stride,is_not_stb1 :=    load_sample_image("../TEST_1r.png");
-    image_buffer1, width, height, color_stride,is_not_stb1 :=    load_sample_image("../test_p0.jpg");
-    image_buffer2:, width=, height=, color_stride=,is_not_stb2:= load_sample_image("../test_p1.jpg");
-    image_buffer3:, width=, height=, color_stride=,is_not_stb3:= load_sample_image("../test_p2.jpg");
 
+
+    //
+    // stb image, this is not related to the gif lbrary, we just want to load in memory a couple of images for testing
+    //
     // image_buffer1, width, height, color_stride,is_not_stb1 :=    load_sample_image("../TEST_1r.png");
-    // image_buffer2:, width=, height=, color_stride=,is_not_stb2:= load_sample_image("../TEST_1g.png");
-    // image_buffer3:, width=, height=, color_stride=,is_not_stb3:= load_sample_image("../TEST_1b.png");
+    image_buffer1:, width:, height:, color_stride:,is_not_stb1  :=    load_sample_image("../test_p0.jpg");
+    image_buffer2:, width=, height=, color_stride=,is_not_stb2  :=    load_sample_image("../test_p1.jpg");
+    image_buffer3:, width=, height=, color_stride=,is_not_stb3  :=    load_sample_image("../test_p2.jpg");
+    //assert(width and heights are the same accross pictures)
+
+
+    //
+    //how to use library starts here
+    //
     // msf_gif_bgra_flag = true; //optionally, set this flag if your pixels are in BGRA format instead of RGBA
     // msf_gif_alpha_threshold = 128; //optionally, enable transparency (see function documentation below for details)
+
     msf_gif_begin  (handle=handle, width, height);
+
+
     msf_gif_frame(handle, image_buffer1.data, centisecondsPerFrame, quality, width*color_stride);
     msf_gif_frame(handle, image_buffer2.data, centisecondsPerFrame, quality, width*color_stride);
     msf_gif_frame(handle, image_buffer3.data, centisecondsPerFrame, quality, width*color_stride);
-    // msf_gif_frame(handle,null, centisecondsPerFrame, quality, width/4);
+
     result := msf_gif_end(handle);
+    //
+    //how to use library finish here, you have in memory the gif now inside reuslt.data and gif_result.dataSize;
+    //
     export_to_gif("../test_p0.gif", result);
+
     log("exported file /test_p0.gif");
 
+    //free, this is example specific has nothing to do with the library
     free_sample_image(image_buffer1, is_not_stb1);
     free_sample_image(image_buffer2, is_not_stb2);
     free_sample_image(image_buffer3, is_not_stb3);

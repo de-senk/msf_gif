@@ -1,66 +1,32 @@
 
+SHOULD_USE_SIMD_DOESNTWORK_PROPERLY_NEEDS_FIXING :: false;
 /*
-HOW TO USE:
-
-    In exactly one translation unit (.c or .cpp file), #define MSF_GIF_IMPL before including the header, like so:
-
-    #define MSF_GIF_IMPL
-    #include "msf_gif.h"
-
-    Everywhere else, just include the header like normal.
-
-
-USAGE EXAMPLE:
-
-    int width = 480, height = 320, centisecondsPerFrame = 5, quality = 16;
-    MsfGifState gifState = {};
-    // msf_gif_bgra_flag = true; //optionally, set this flag if your pixels are in BGRA format instead of RGBA
-    // msf_gif_alpha_threshold = 128; //optionally, enable transparency (see function documentation below for details)
-    msf_gif_begin(&gifState, width, height);
-    msf_gif_frame(&gifState, ..., centisecondsPerFrame, quality, width * 4); //frame 1
-    msf_gif_frame(&gifState, ..., centisecondsPerFrame, quality, width * 4); //frame 2
-    msf_gif_frame(&gifState, ..., centisecondsPerFrame, quality, width * 4); //frame 3, etc...
-    MsfGifResult result = msf_gif_end(&gifState);
-    if (result.data) {
-        FILE * fp = fopen("MyGif.gif", "wb");
-        fwrite(result.data, result.dataSize, 1, fp);
-        fclose(fp);
-    }
-
-    msf_gif_free(result);
-
-Detailed function documentation can be found in the header section below.
-
-
-ERROR HANDLING:
-
-    If memory allocation fails, the functions will signal the error via their return values.
-    If one function call fails, the library will free all of its allocations,
-    and all subsequent calls will safely no-op and return 0 until the next call to `msf_gif_begin()`.
-    Therefore, it's safe to check only the return value of `msf_gif_end()`.
-
-
-REPLACING MALLOC:
-
-    This library uses malloc+realloc+free internally for memory allocation.
-    To facilitate integration with custom memory allocators, these calls go through macros, which can be redefined.
-    The expected function signature equivalents of the macros are as follows:
-
-    void * MSF_GIF_MALLOC(void * context, msf_size_t newSize)
-    void * MSF_GIF_REALLOC(void * context, void * oldMemory, msf_size_t oldSize, msf_size_t newSize)
-    void MSF_GIF_FREE(void * context, void * oldMemory, msf_size_t oldSize)
-
-    If your allocator needs a context pointer, you can set the `customAllocatorContext` field of the MsfGifState struct
-    before calling msf_gif_begin(), and it will be passed to all subsequent allocator macro calls.
-
-    The maximum number of bytes the library will allocate to encode a single gif is bounded by the following formula:
-    `(2 * 1024 * 1024) + (128 * 1024) + (width * height * 8) + ((2048 + width * height * 1.5) * 2 * frameCount)`
-    The peak heap memory usage in bytes, if using a general-purpose heap allocator, is bounded by the following formula:
-    `(2 * 1024 * 1024) + (128 * 1024) + (width * height * 11) + 2048 + (16 * frameCount) + (2 * sizeOfResultingGif)
-
-
 See end of file for license information.
 */
+
+//I used this to compare debug build with release build, and I see no performance benefits from SIMD in the release mode. I used an eyemeter tho.
+#insert #run maybe_insert_DEBUG();
+maybe_insert_DEBUG :: () -> string
+{
+    #import "Basic";
+    #import "Compiler";
+    current_w := get_current_workspace();
+    options := get_build_options(current_w);
+    should_debug_be_true: bool ;
+    should_debug_be_true = options.backend == .X64;
+    if !should_debug_be_true {
+        //try guess if we are in debug from llvm options
+        should_debug_be_true = options.llvm_options.bitcode_optimization_setting == .O0;
+        should_debug_be_true |= options.llvm_options.machine_code_optimization_setting == .NONE;
+        should_debug_be_true |= options.llvm_options.machine_code_optimization_setting == .UNSET;
+    }
+    //TODO(tr): check if debug already exsts with #if #exists(DEBUG) and... the TODO is to figure out what to do.
+    #if #exists(DEBUG) then return ""; //early return
+
+    b: String_Builder;
+    print_to_builder(*b, "DEBUG :: %1; //inserted by maybe_insert_DEBUG", should_debug_be_true);
+    return builder_to_string(*b);
+}
 
 //version 2.4
 msf_size_t :: s64;
@@ -100,6 +66,7 @@ MsfGifState :: struct { //internal use
 } ;
 
 #scope_module
+SHOULD_LOG :: true;
 #import "Basic";
 bitops ::#import "Bit_Operations";
 
@@ -137,7 +104,6 @@ test_values: [20]int = int.[
         // compute reference: floor(log2(v)) + 1 for v>0.
         expected := 0;
         if (v == 0) {
-            // match current implementation behaviour
             expected = 1;
         } else {
             t := v;
@@ -159,16 +125,9 @@ test_values: [20]int = int.[
 }
 */
 
-
-// typedef msf_size_t (* MsfGifFileWriteFunc) (const void * buffer, msf_size_t size, msf_size_t count, void * stream);
-// typedef msf_size_t (* MsfGifFileWriteFunc) (const void * buffer, msf_size_t size, msf_size_t count, void * stream);
-
 MsfGifFileWriteFunc :: (buffer: *void, size: msf_size_t, count: msf_size_t, stream: *void) ->  msf_size_t {
-
     return 0;
 }
-
-
 
 offset_of :: ($T: Type, $member: string) -> int {
     for type_info(T).members {
@@ -180,7 +139,6 @@ offset_of :: ($T: Type, $member: string) -> int {
 }
 
 #scope_export
-// #if #exists(__IPROF) #load "examples/example1.jai";
 
 msf_gif_begin :: (handle: *MsfGifState, width: int, height: int) -> int {
     //profiler->MsfTimeFunc
@@ -262,7 +220,8 @@ msf_gif_bgra_flag := 0;
  msf_cook_frame :: (frame: *MsfCookedFrame, raw: *u8, used: *u8,
                            width: int, height: int, pitch: int, depth: int)
 {
-    log("cooking frame: width: %, height: %, pitch: %, depth: %", width, height, pitch, depth);
+// debug_break();
+    #if SHOULD_LOG log("DEBUG:%,cooking frame: width: %, height: %, pitch: %, depth: %",DEBUG, width, height, pitch, depth);
     //for profiling ->  MsfTimeFunc
     //bit depth for each channel
     rdepthsArray: [17]int = int.[ 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 5, 5 ];
@@ -299,12 +258,12 @@ msf_gif_bgra_flag := 0;
         memset(used, 0, paletteSize * size_of(u8));
 
         //TODO: document what this math does and why it's correct
-        rdiff:s32 = cast(s32)(1 << (8 - rbits)) - 1;
-        gdiff:s32 = cast(s32)(1 << (8 - gbits)) - 1;
-        bdiff:s32 = cast(s32)(1 << (8 - bbits)) - 1;
+        rdiff:s16 = cast(s16)(1 << (8 - rbits)) - 1;
+        gdiff:s16 = cast(s16)(1 << (8 - gbits)) - 1;
+        bdiff:s16 = cast(s16)(1 << (8 - bbits)) - 1;
         rmul := cast(u16) ((255.0 - rdiff) / 255.0 * 257);
-        gmul := cast(u32) ((255.0 - gdiff) / 255.0 * 257);
         bmul := cast(u16) ((255.0 - bdiff) / 255.0 * 257);
+        gmul := cast(u32) ((255.0 - gdiff) / 255.0 * 257);
 
         gmask:s32 = cast(s32)(((1 << gbits) - 1) << rbits);
         bmask:s32 = cast(s32)((((1 << bbits) - 1) << rbits) << gbits);
@@ -316,7 +275,7 @@ msf_gif_bgra_flag := 0;
             x :s32= 0;
         //maybe this: https://www.codeproject.com/articles/Dither-Ordered-and-Floyd-Steinberg-Monochrome-Colo
         //I give up for now.
-            #if 0{
+            #if DEBUG && SHOULD_USE_SIMD_DOESNTWORK_PROPERLY_NEEDS_FIXING {
 
             k := *ditherKernel[(y & 3) * 4];
 
@@ -365,13 +324,13 @@ msf_gif_bgra_flag := 0;
                     mask_000000FF: *u32,mask_0000FFFF: *u32,mask_00FF00FF: *u32, mask_FFFFFFFF: *u32,mask_00FFFFFF: *u32,
                     rbits: *u32, bbits: *u32, gbits: *u32, cooked: *u32
 
-                ) -> s32 #expand {
+                ) -> s32 #expand #dump{
 
-            idk_man:: u32.[0x00000F0F];//:tagabgr? it is B G R? and alpha? no, idk what are the last rwo
+            idk_man:: u32.[0x00000F0F] #align 32;//:tagabgr? it is B G R? and alpha? no, idk what are the last rwo
             pidk_man := idk_man.data;
-            idk_man2:: u32.[0x0000F000];//:tagabgr? it is B G R? and alpha? no, idk what are the last rwo
+            idk_man2:: u32.[0x0000F000] #align 32;//:tagabgr? it is B G R? and alpha? no, idk what are the last rwo
             pidk_man2 := idk_man2.data;
-            idk_man3:: u32.[0x000000FF];//:tagabgr? it is B G R? and alpha? no, idk what are the last rwo
+            idk_man3:: u32.[0x000000FF] #align 32;//:tagabgr? it is B G R? and alpha? no, idk what are the last rwo
             pidk_man3 := idk_man3.data;
             while x < width - 3 { defer x+=1;
                  pixels_ptr :*u8= *raw[y * pitch + x * 4];
@@ -394,11 +353,11 @@ msf_gif_bgra_flag := 0;
                     // __m128i rb2 = _mm_adds_epu16(rb1, k2);
                     paddusw.x xmm4, vk2;
                 }
-                result := DEBUG_BREAK_STORE(xmm4);
+                // result := DEBUG_BREAK_STORE(xmm4);
 
-                debug_break();
+                // debug_break();
                 broadcast_to_brs(mask_0000FFFF);
-                broadcast_to_brs(pidk_man2);
+                // broadcast_to_brs(pidk_man2);
 
                 #asm AVX, AVX2 {
                     movdqa.x xmm5:, xmm4; //copy
@@ -406,12 +365,11 @@ msf_gif_bgra_flag := 0;
                     pand.x xmm5, brs;
                 }
 
+
                 #asm AVX, AVX2 {
                         mov regular, 16;
                         sub regular, [rbits];
                 }
-
-                // PREMATURE_CHECK(xmm5, cooked_ptr);
                 broadcast_to_brs_regular_already_filled();
 
                 #asm AVX, AVX2  {
@@ -451,7 +409,7 @@ msf_gif_bgra_flag := 0;
                 //we have vmul_g from previous
                 //brs := _mm_set1_epi32(0x000000FF)
                 broadcast_to_brs(mask_0000FFFF);
-                broadcast_to_brs(pidk_man3);
+                // broadcast_to_brs(pidk_man3);
 
                  #asm AVX, AVX2  {
                     //argument := mm_srli_epi32(p, 8), _mm_set1_epi32(0x000000FF)
@@ -465,9 +423,7 @@ msf_gif_bgra_flag := 0;
                     // _mm_and_si128(argument);
                     pand.x xmm6, brs; //xmm6 is g
                 }
-                PREMATURE_CHECK(xmm4, cooked_ptr);
-                //_mm_adds_epu16(g1, _mm_srli_epi32(k, gbits)
-                broadcast_to_brs(gbits);
+
 
                 #asm AVX, AVX2  {
                     //g1 := _mm_mullo_epi16(g, _mm_set1_epi32(gmul));
@@ -482,7 +438,9 @@ msf_gif_bgra_flag := 0;
                     paddusw.x xmm6, xmm7; //g2
 
                 }
-
+                #if SHOULD_LOG log("premature check is here, delete this line to MORE bad results, Im no simd god so I cannot fix this, yet.");
+                #if SHOULD_LOG log("You might want to disable SIMD unless you want to fix this.");
+                PREMATURE_CHECK(xmm6, cooked_ptr);
                 #asm AVX, AVX2  {
 
                         mov regular, 16; //we reuse regular
@@ -507,19 +465,22 @@ msf_gif_bgra_flag := 0;
                  //__m128i g3 = _mm_and_si128(argument);
                  //argument := _mm_srli_epi32(g2, 16 - rbits - gbits), _mm_set1_epi32(gmask)
                  //argument := _mm_srli_epi32(xmm6, brs)
-                    pand.x xmm6, brs; //g3
+                    paddusw.x xmm6, brs; //g3
                 }
 
                 #asm AVX, AVX2  {
                     por.x xmm5, xmm6; //r3 or'ed with  g3
                     //__m128i out = _mm_or_si128(_mm_or_si128(r3, g3), b3);
                     por.x xmm5, xmm4; //     br=xmm4
-                    //mask in transparency based on threshold
                     }
+                //xmm5 is full green here
 
 
+                //_mm_adds_epu16(g1, _mm_srli_epi32(k, gbits)
+                broadcast_to_brs(gbits);
 
                 #asm AVX, AVX2  {
+                //mask in transparency based on threshold
                 // __m128i invAlphaMask = _mm_cmplt_epi32(_mm_srli_epi32(p, 24), _mm_set1_epi32(msf_gif_alpha_threshold));
                 // __m128i invAlphaMask = _mm_cmplt_epi32(argument);
                 //argument:=_mm_srli_epi32(p, 24), _mm_set1_epi32(msf_gif_alpha_threshold)
@@ -647,12 +608,12 @@ msf_gif_bgra_flag := 0;
             mask_000000FF := u32.[0x000000FF].data;
             mask_0000FFFF := u32.[0x0000FFFF].data;
             mask_00FFFFFF := u32.[0x00FFFFFF].data;
-            mask_FFFFFFFF := u32.[0xFFFFFFFF].data;
+            mask_FFFFFFFF := u32.[0xFFFFFFFF].data ;
 
-            mul_rb := u16.[rmul, bmul, rmul, bmul, rmul, bmul, rmul, bmul,  rmul, bmul, rmul, bmul, rmul, bmul, rmul, bmul   ,  rmul, bmul, rmul, bmul, rmul, bmul, rmul, bmul].data;
+            mul_rb := u16.[rmul, bmul, rmul, bmul, rmul, bmul, rmul, bmul,  rmul, bmul, rmul, bmul, rmul, bmul, rmul, bmul   ,  rmul, bmul, rmul, bmul, rmul, bmul, rmul, bmul].data ;
             mul_g  := u32.[gmul, gmul, gmul, gmul,gmul, gmul, gmul, gmul,   gmul, gmul, gmul, gmul,gmul, gmul, gmul, gmul].data;
 
-            bmask_vec := u32.[cast(u32)bmask, cast(u32)bmask, cast(u32)bmask, cast(u32)bmask].data;
+            bmask_vec := u32.[cast(u32)bmask, cast(u32)bmask, cast(u32)bmask, cast(u32)bmask].data ;
             gmask_vec := u32.[cast(u32)gmask, cast(u32)gmask, cast(u32)gmask, cast(u32)gmask].data;
 
             alpha_threshold := u32.[cast(u32)msf_gif_alpha_threshold, cast(u32)msf_gif_alpha_threshold,cast(u32) msf_gif_alpha_threshold, cast(u32)msf_gif_alpha_threshold].data;
@@ -863,6 +824,7 @@ CPP
                 cooked[y * width + x] =cast,trunc(u32) (a | b | c);
 
             }
+
             #if 0 //force anti simd
             {
             x= 0;
@@ -876,7 +838,6 @@ CPP
                     //transparent pixel if alpha is low
                     if (p[3] < msf_gif_alpha_threshold) {
                         cooked[y * width + x] = cast(u32) (paletteSize - 1);
-                        log("ASD");
                         continue;
                     }
 
@@ -1032,21 +993,14 @@ msf_lzw_reset :: inline (lzw: *MsfStridedList, tableSize: int, stride: int) {
 
     //SPEC: "Because of some algorithmic constraints however, black & white images which have one color bit
     //       must be indicated as having a code size of 2."
-    // log("aa %", msf_bit_log(tableIdx - 1));
-    // log("hasTransparentPixels %", used[tlbSize-1]);
-    // log("hasTransparentPixels %", used[tlbSize-2]);
-    // log("hasTransparentPixels %", used[tlbSize-3]);
     tableBits:int = max(2, msf_bit_log(tableIdx - 1));
-    // log("tableIdx %", tableIdx);
-    // log("tableBits %", tableBits);
     tableSize:int = 1 << tableBits;
-    // log("tableSize %", tableSize);
     //NOTE: we don't just compare `depth` field here because it will be wrong for the first frame and we will segfault
     previous: MsfCookedFrame = handle.previousFrame;
+
     hasSamePal:int = cast(int) (frame.rbits == previous.rbits && frame.gbits == previous.gbits && frame.bbits == previous.bbits);
-    // hasSamePal:int = frame.rbits == previous.rbits && frame.gbits == previous.gbits && frame.bbits == previous.bbits;
     framesCompatible:int = cast(int)( hasSamePal && !hasTransparentPixels);
-    // framesCompatible:int = hasSamePal && !hasTransparentPixels;
+
 
     //write the Graphics `Control Extension` and `Image Descriptor` blocks
     //NOTE: because __attribute__((__packed__)) is annoyingly compiler-specific, we do this unreadable weirdness
