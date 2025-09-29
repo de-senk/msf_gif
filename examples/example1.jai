@@ -18,7 +18,7 @@ main :: () {
     image_buffer2:, width=, height=, color_stride=,is_not_stb2  :=    load_sample_image("../test_p1.jpg");
     image_buffer3:, width=, height=, color_stride=,is_not_stb3  :=    load_sample_image("../test_p2.jpg");
     //assert(width and heights are the same accross pictures)
-
+    assert(color_stride == 4);
 
     //
     //how to use library starts here
@@ -93,16 +93,6 @@ load_sample_image :: (filename: string) -> image_buffer: []u8, width: int, heigh
     return image_buffer, width, height, color_stride, should_not_deallocate_by_stb;
 }
 
-free_sample_image :: (image_buffer: []u8, is_not_stb: bool) {
-
-    image :: #import "stb_image";
-    if is_not_stb then {
-        array_free(image_buffer);
-    } else {
-        image.stbi_image_free(image_buffer.data);
-    }
-}
-
 
 force_image_into_4_channels::(ptr_ptr_img_data: **u8, width: int, height: int, nrChannels: int) -> *u8
 {
@@ -161,4 +151,16 @@ force_image_into_4_channels::(ptr_ptr_img_data: **u8, width: int, height: int, n
      log("reallocated image memory % and freed the previous one", strided_offset);    //reallocate to 4
      return old_ptr;
   }
+
+free_sample_image :: (image_buffer: []u8, is_not_stb: bool) {
+
+    image :: #import "stb_image";
+    if is_not_stb then {
+        array_free(image_buffer);
+    } else {
+        image.stbi_image_free(image_buffer.data);
+    }
+}
+
+
 
