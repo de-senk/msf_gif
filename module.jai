@@ -1,5 +1,6 @@
 
-SHOULD_USE_SIMD_DOESNTWORK_PROPERLY_NEEDS_FIXING :: true;
+SHOULD_SIMD :: true;
+SHOULD_SIMD_ON_RELEASE :: true;
 /*
 See end of file for license information.
 */
@@ -24,8 +25,7 @@ maybe_insert_DEBUG :: () -> string
     #if #exists(DEBUG) then return ""; //early return
 
     b: String_Builder;
-    print_to_builder(*b, "DEBUG :: %1; //inserted by maybe_insert_DEBUG", should_debug_be_true);
-    print_to_builder(*b, "DEBUG :: %1; //inserted by maybe_insert_DEBUG", true);
+    print_to_builder(*b, "DEBUG :: %1; //inserted by maybe_insert_DEBUG", should_debug_be_true || SHOULD_SIMD_ON_RELEASE);
     return builder_to_string(*b);
 }
 
@@ -271,8 +271,7 @@ msf_cook_frame :: (frame: *MsfCookedFrame, raw: *u8, used: *u8, width: int, heig
             x :s32= 0;
         //maybe this: https://www.codeproject.com/articles/Dither-Ordered-and-Floyd-Steinberg-Monochrome-Colo
         //// #if (defined (__SSE2__) || defined (_M_X64) || _M_IX86_FP == 2) && !defined(MSF_GIF_NO_SSE2)
-        // #if DEBUG && SHOULD_USE_SIMD_DOESNTWORK_PROPERLY_NEEDS_FIXING
-        #if true
+        #if (DEBUG || SHOULD_SIMD_ON_RELEASE) && SHOULD_SIMD
         {
 
             k := *(ditherKernel_ptr[(y & 3) * 4]);
@@ -291,7 +290,7 @@ msf_cook_frame :: (frame: *MsfCookedFrame, raw: *u8, used: *u8, width: int, heig
             }
 
             PREMATURE_CHECK_LOW :: (val_to_insert: reg, ptr: *u32) #expand {
-                #asm  {
+                #asm  AVX, AVX2 {
                         movq OUT, val_to_insert;
                 }
                 #asm AVX, AVX2  {
@@ -333,8 +332,8 @@ msf_cook_frame :: (frame: *MsfCookedFrame, raw: *u8, used: *u8, width: int, heig
                 //xmm4  === rb = _mm_and_si128(p, _mm_set1_epi32(0x00FF00FF));
                 broadcast_to_brs(mask_00FF00FF_ptr);
                 // broadcast_to_brs(pidk_man3);
-                #asm  {
-                    pand xmm4, brs;  //Compute the bitwise AND of 128 bits (representing integer data) in a and b, and store the result in dst.
+                #asm  SSE2, AVX, AVX2 {
+                    pand.x xmm4, brs;  //Compute the bitwise AND of 128 bits (representing integer data) in a and b, and store the result in dst.
                 }
                 //---
 
@@ -381,8 +380,7 @@ msf_cook_frame :: (frame: *MsfCookedFrame, raw: *u8, used: *u8, width: int, heig
                         sub regular, bbits;
                 }
                 zero_extend_to_brs_regular_already_filled();
-                #asm AVX, AVX2
-                {
+                #asm AVX, AVX2  {
                     psrld.x xmm4, brs;//Shift packed 32-bit integers in a right by imm8 while shifting in zeros, and store the results in dst.
                 }
                 broadcast_to_brs(bmask_ptr);
@@ -559,7 +557,7 @@ msf_cook_frame :: (frame: *MsfCookedFrame, raw: *u8, used: *u8, width: int, heig
 
             //TODO: Add an image of what this procedure does to the github
             fill_k_vec_and_k2_vec :: (k: *s32) #expand {
-            #asm AVX {
+            #asm AVX, AVX2 {
                 //k_vec === k = _mm_loadu_si128((__m128i *) &ditherKernel[(y & 3) * 4]);
                     movdqu.x k_vec, [k]; //k
                 //k2_vec === k2 = _mm_or_si128(_mm_srli_epi32(k, rbits), _mm_slli_epi32(_mm_srli_epi32(k, bbits), 16));
