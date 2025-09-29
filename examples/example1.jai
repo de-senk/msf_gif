@@ -33,6 +33,34 @@ main :: () {
     msf_gif_frame(handle, image_buffer2.data, centisecondsPerFrame, quality, width*color_stride);
     msf_gif_frame(handle, image_buffer3.data, centisecondsPerFrame, quality, width*color_stride);
 
+    msf_gif_frame(handle, image_buffer1.data, centisecondsPerFrame, quality, width*color_stride);
+    msf_gif_frame(handle, image_buffer2.data, centisecondsPerFrame, quality, width*color_stride);
+    msf_gif_frame(handle, image_buffer3.data, centisecondsPerFrame, quality, width*color_stride);
+
+    msf_gif_frame(handle, image_buffer1.data, centisecondsPerFrame, quality, width*color_stride);
+    msf_gif_frame(handle, image_buffer2.data, centisecondsPerFrame, quality, width*color_stride);
+    msf_gif_frame(handle, image_buffer3.data, centisecondsPerFrame, quality, width*color_stride);
+
+    msf_gif_frame(handle, image_buffer1.data, centisecondsPerFrame, quality, width*color_stride);
+    msf_gif_frame(handle, image_buffer2.data, centisecondsPerFrame, quality, width*color_stride);
+    msf_gif_frame(handle, image_buffer3.data, centisecondsPerFrame, quality, width*color_stride);
+
+    msf_gif_frame(handle, image_buffer1.data, centisecondsPerFrame, quality, width*color_stride);
+    msf_gif_frame(handle, image_buffer2.data, centisecondsPerFrame, quality, width*color_stride);
+    msf_gif_frame(handle, image_buffer3.data, centisecondsPerFrame, quality, width*color_stride);
+
+    msf_gif_frame(handle, image_buffer1.data, centisecondsPerFrame, quality, width*color_stride);
+    msf_gif_frame(handle, image_buffer2.data, centisecondsPerFrame, quality, width*color_stride);
+    msf_gif_frame(handle, image_buffer3.data, centisecondsPerFrame, quality, width*color_stride);
+
+    msf_gif_frame(handle, image_buffer1.data, centisecondsPerFrame, quality, width*color_stride);
+    msf_gif_frame(handle, image_buffer2.data, centisecondsPerFrame, quality, width*color_stride);
+    msf_gif_frame(handle, image_buffer3.data, centisecondsPerFrame, quality, width*color_stride);
+    
+    msf_gif_frame(handle, image_buffer1.data, centisecondsPerFrame, quality, width*color_stride);
+    msf_gif_frame(handle, image_buffer2.data, centisecondsPerFrame, quality, width*color_stride);
+    msf_gif_frame(handle, image_buffer3.data, centisecondsPerFrame, quality, width*color_stride);
+
     result := msf_gif_end(handle);
     //
     //how to use library finish here, you have in memory the gif now inside reuslt.data and gif_result.dataSize;

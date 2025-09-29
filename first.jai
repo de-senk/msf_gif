@@ -42,7 +42,7 @@ FOR_CODEX :: true;
     options.emit_debug_info = .CODEVIEW;
     }
 
-    set_optimization(*options,.VERY_OPTIMIZED, false);
+    set_optimization(*options,.VERY_OPTIMIZED, true);
     // options.llvm_options.enable_slp_vectorization = .VERY_OPTIMIZED; delete this comment
 
 

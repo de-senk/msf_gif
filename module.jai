@@ -25,6 +25,7 @@ maybe_insert_DEBUG :: () -> string
 
     b: String_Builder;
     print_to_builder(*b, "DEBUG :: %1; //inserted by maybe_insert_DEBUG", should_debug_be_true);
+    print_to_builder(*b, "DEBUG :: %1; //inserted by maybe_insert_DEBUG", true);
     return builder_to_string(*b);
 }
 
@@ -65,12 +66,13 @@ MsfGifState :: struct { //internal use
     framesSubmitted       :  int; //needed for transparency to work correctly (because we reach into the previous frame)
 } ;
 
+
 #scope_module
 SHOULD_LOG :: true;
 #import "Basic";
 bitops ::#import "Bit_Operations";
 
-// msf_bit_log :: inline (i: int) -> int { return 32 - __builtin_clzl(i); }
+// msf_bit_log :: inline (i: int) -> int { return 32 - bitops.__builtin_clzl(i); }
 // msf_bit_log :: inline (i: int) -> int { return 1 + bitops.bit_scan_reverse(i);} //maybe bit_scan_forward == 32 - bit_scan_reverse?
 msf_bit_log :: inline (i_unmutable: int) -> int {
     i:= i_unmutable;
@@ -217,24 +219,21 @@ msf_gif_alpha_threshold := 0;
 //Set `msf_gif_bgra_flag = true` before calling `msf_gif_frame()` if your pixels are in BGRA byte order instead of RBGA.
 msf_gif_bgra_flag := 0;
 
- msf_cook_frame :: (frame: *MsfCookedFrame, raw: *u8, used: *u8,
-                           width: int, height: int, pitch: int, depth: int)
-{
-// debug_break();
+msf_cook_frame :: (frame: *MsfCookedFrame, raw: *u8, used: *u8, width: int, height: int, pitch: int, depth: int){
+
+    // debug_break();
     #if SHOULD_LOG log("DEBUG:%,cooking frame: width: %, height: %, pitch: %, depth: %",DEBUG, width, height, pitch, depth);
     //for profiling ->  MsfTimeFunc
     //bit depth for each channel
-    rdepthsArray: [17]int = int.[ 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 5, 5 ];
-    gdepthsArray: [17]int = int.[ 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 5, 5, 6 ];
-    bdepthsArray: [17]int = int.[ 0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 5 ];
-    //this extra level of indirection looks unnecessary but we need to explicitly decay the arrays to pointers
-    //in order to be able to swap them because of C's annoying not-quite-pointers, not-quite-value-types stack arrays.
-    rdepths := ifx msf_gif_bgra_flag then bdepthsArray.data else rdepthsArray.data;
-    gdepths := gdepthsArray.data;
-    bdepths := ifx msf_gif_bgra_flag then rdepthsArray.data else bdepthsArray.data;
+    rdepthsArray_ptr := int.[ 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 5, 5 ].data;
+    gdepthsArray_ptr := int.[ 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 5, 5, 6 ].data;
+    bdepthsArray_ptr := int.[ 0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 5 ].data;
+    rdepths := ifx msf_gif_bgra_flag then bdepthsArray_ptr else rdepthsArray_ptr;
+    gdepths := gdepthsArray_ptr;
+    bdepths := ifx msf_gif_bgra_flag then rdepthsArray_ptr else bdepthsArray_ptr;
 
 
-    ptr_ditherKernel: *s32 = s32.[
+    ditherKernel_ptr: *s32 = s32.[
          0 << 12,  8 << 12,  2 << 12, 10 << 12,
         12 << 12,  4 << 12, 14 << 12,  6 << 12,
          3 << 12, 11 << 12,  1 << 12,  9 << 12,
@@ -247,9 +246,6 @@ msf_gif_bgra_flag := 0;
     // MsfTimeLoop("do") do
     while true
     {
-
-    //@Check -> while (count >= 256 && --depth);
-
         rbits:s32 = cast(s32)rdepths[depth];
         gbits:s32 = cast(s32)gdepths[depth];
         bbits:s32 = cast(s32)bdepths[depth];
@@ -274,20 +270,17 @@ msf_gif_bgra_flag := 0;
             y:= cast(s32)ya;
             x :s32= 0;
         //maybe this: https://www.codeproject.com/articles/Dither-Ordered-and-Floyd-Steinberg-Monochrome-Colo
-        //I give up for now.
-            #if DEBUG && SHOULD_USE_SIMD_DOESNTWORK_PROPERLY_NEEDS_FIXING {
+        //// #if (defined (__SSE2__) || defined (_M_X64) || _M_IX86_FP == 2) && !defined(MSF_GIF_NO_SSE2)
+        // #if DEBUG && SHOULD_USE_SIMD_DOESNTWORK_PROPERLY_NEEDS_FIXING
+        #if true
+        {
 
-            k := *(ptr_ditherKernel[(y & 3) * 4]);
+            k := *(ditherKernel_ptr[(y & 3) * 4]);
 
-            // x = ColorQuantizeSSE2(raw, cooked,cast(s32) width, cast(s32)height, cast(s32)pitch,
-            //                       rmul, gmul, bmul,
-            //                       cast(*u32)*rbits, cast(*u32)*gbits, cast(*u32)*bbits,
-            //                       cast(u32)gmask, cast(u32)bmask,
-            //                       palette_minus_one, cast(u32)msf_gif_alpha_threshold,
-            //                         ditherKernel.data);
 
 
             reg::__reg;
+
 
             PREMATURE_CHECK :: (val_to_insert: reg, ptr: *u32) #expand {
                 #asm AVX, AVX2  {
@@ -302,14 +295,12 @@ msf_gif_bgra_flag := 0;
                         movq OUT, val_to_insert;
                 }
                 #asm AVX, AVX2  {
-
-                    // movdqa.x OUT, val_to_insert;
                     movdqu.x [ptr], OUT;
                 }
                  continue;
             }
 
-            DEBUG_BREAK_STORE :: (val_to_insert: reg)  -> [8]u32 #expand{
+            DEBUG_BREAK_STORE :: (val_to_insert: reg)  -> [8]u32 #expand {
                 result : [8]u32 = ---;
                 // array_resize(*watchme);
                 result_ptr := result.data;
@@ -323,31 +314,24 @@ msf_gif_bgra_flag := 0;
             //https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#ig_expand=4029,305,343,287,305,4842,80,89,4760,4760,196,4760,305,4029,305,6423,6405&text=por&techs=SSE_ALL
             //
             pesky_simd :: (x:u32, y:u32, width: u32, raw: *u8, pitch: u32, paletteSize: u32,
-                    palette_minus_one: *u32,alpha_threshold: *u32, cooked: *u32
+                     cooked: *u32) -> s32 #expand #dump{
 
-                ) -> s32 #expand #dump{
 
-            // idk_man:: u32.[0x00000F0F] #align 32;//:tagabgr? it is B G R? and alpha? no, idk what are the last rwo
-            // pidk_man := idk_man.data;
-            // idk_man2:: u32.[0x0000F000] #align 32;//:tagabgr? it is B G R? and alpha? no, idk what are the last rwo
-            // pidk_man2 := idk_man2.data;
-            idk_man3:: u32.[0x000000FF] #align 32;//:tagabgr? it is B G R? and alpha? no, idk what are the last rwo
-            pidk_man3 := idk_man3.data;
-            while x < width - 3 { defer x+=4;
-                 pixels_ptr :*u8= *raw[y * pitch + x * 4];
-                 cooked_ptr :*u32= *cooked[y * width + x];;
+            while x < width - 3 {
+                defer x+=4;
+                pixels_ptr :*u8= *raw[y * pitch + x * 4];
+                cooked_ptr :*u32= *cooked[y * width + x];;
 
                 // broadcast_to_brs(pidk_man);
-                // inter engineers says that q == quad (multiply by 4) == quarter (multiply by 1/4), hol* f*k**g sh**t
-                //if p is at the beginning, probably we are dealing with integers.
                 //p === p = _mm_loadu_si128((__m128i *) pixels);
                 #asm AVX, AVX2 {
                     movdqu.x p:, [pixels_ptr]; //Load 128-bits of integer data from memory into dst. mem_addr does not need to be aligned on any particular boundary.
                     movdqa.x xmm4:, p;
                     }
+                //---
 
                 //xmm4  === rb = _mm_and_si128(p, _mm_set1_epi32(0x00FF00FF));
-                broadcast_to_brs(mask_00FF00FF);
+                broadcast_to_brs(mask_00FF00FF_ptr);
                 // broadcast_to_brs(pidk_man3);
                 #asm  {
                     pand xmm4, brs;  //Compute the bitwise AND of 128 bits (representing integer data) in a and b, and store the result in dst.
@@ -367,14 +351,11 @@ msf_gif_bgra_flag := 0;
                 }
                 //---
 
-
-
-
-                    // result := DEBUG_BREAK_STORE(xmm4);
-                    // debug_break();
+                // result := DEBUG_BREAK_STORE(xmm4);
+                // debug_break();
 
                 //xmm5 === r3 = _mm_srli_epi32(_mm_and_si128(rb2, _mm_set1_epi32(0x0000FFFF)), 16 - rbits);
-                broadcast_to_brs(mask_0000FFFF);
+                broadcast_to_brs(mask_0000FFFF_ptr);
                 #asm AVX, AVX2 {
                     movdqa.x xmm5:, xmm4; //copy //Load 128-bits of integer data from memory into dst. mem_addr must be aligned on a 16-byte boundary or a general-protection exception may be generated.
                     pand.x xmm5, brs; //Compute the bitwise AND of 128 bits (representing integer data) in a and b, and store the result in dst.
@@ -384,7 +365,7 @@ msf_gif_bgra_flag := 0;
                         mov regular, 16;
                         sub regular, rbits;
                 }
-                broadcast_to_brs_regular_already_filled();
+                zero_extend_to_brs_regular_already_filled();
                 #asm AVX, AVX2  {
                     psrld.x xmm5, brs; //Shift packed 32-bit integers in a right by imm8 while shifting in zeros, and store the results in dst.
                 }
@@ -399,7 +380,7 @@ msf_gif_bgra_flag := 0;
                         sub regular, gbits;
                         sub regular, bbits;
                 }
-                broadcast_to_brs_regular_already_filled();
+                zero_extend_to_brs_regular_already_filled();
                 #asm AVX, AVX2
                 {
                     psrld.x xmm4, brs;//Shift packed 32-bit integers in a right by imm8 while shifting in zeros, and store the results in dst.
@@ -413,7 +394,7 @@ msf_gif_bgra_flag := 0;
 
                 //xmm6 === g = _mm_and_si128(_mm_srli_epi32(p, 8), _mm_set1_epi32(0x000000FF));
                 //xmm6 === g = _mm_and_si128(xmm6, brs);
-                broadcast_to_brs(mask_000000FF);
+                broadcast_to_brs(mask_000000FF_ptr);
                  #asm AVX, AVX2  {
                     movdqu.x xmm6:, [pixels_ptr];
                     // movdqa.x xmm6:, p; //we copy p that is the pixel
@@ -436,7 +417,7 @@ msf_gif_bgra_flag := 0;
                         xor regular, regular; //we reuse regular
                         mov regular, gbits; //we reuse regular
                 }
-                broadcast_to_brs_regular_already_filled();
+                zero_extend_to_brs_regular_already_filled();
                 #asm AVX, AVX2  { //12
                     movdqa.x xmm7:, k_vec; //we copy k into xmm7
                     psrld.x xmm7, brs; //>>gbits ////Shift packed 32-bit integers in a right by imm8 while shifting in zeros, and store the results in dst.
@@ -452,7 +433,7 @@ msf_gif_bgra_flag := 0;
                         sub regular, rbits;
                         sub regular, gbits;
                 }
-                broadcast_to_brs_regular_already_filled();
+                zero_extend_to_brs_regular_already_filled();
                 #asm AVX, AVX2  {
                     psrld.x xmm6, brs; //Shift packed 32-bit integers in a right by imm8 while shifting in zeros, and store the results in dst.
                 }
@@ -462,13 +443,6 @@ msf_gif_bgra_flag := 0;
                 }
                 //---
 
-             //ABOVE WORKS
-                //ABOVE WORKS
-                //ABOVE WORKS
-                //ABOVE WORKS
-                //ABOVE WORKS
-
-
 
                 //xmm5 === out = _mm_or_si128(_mm_or_si128(r3, g3), b3);
                 //xmm5 === out = _mm_or_si128(_mm_or_si128(xmm5, xmm6), xmm4);
@@ -476,106 +450,75 @@ msf_gif_bgra_flag := 0;
                     por.x xmm5, xmm6; //Compute the bitwise OR of 128 bits (representing integer data) in a and b, and store the result in dst.
                     por.x xmm5, xmm4; //xmm4 is b3 //Compute the bitwise OR of 128 bits (representing integer data) in a and b, and store the result in dst.
                     }
-                //xmm5 is full green here -----------------------------
+               //---
 
-
-                PREMATURE_CHECK(xmm5, cooked_ptr);
+                // PREMATURE_CHECK(xmm5, cooked_ptr);
 
                 //mask in transparency based on threshold
-                 #if 0 {
-                    #asm AVX, AVX2  {
-                    // __m128i invAlphaMask = _mm_cmplt_epi32(_mm_srli_epi32(p, 24), _mm_set1_epi32(msf_gif_alpha_threshold));
-                    // __m128i invAlphaMask = _mm_cmplt_epi32(argument);
-                    //argument:=_mm_srli_epi32(p, 24), _mm_set1_epi32(msf_gif_alpha_threshold)
 
-                        //_mm_srli_epi32(p, 24)
-                        movdqa.x xmm1:, p; //we copy the pixel, just in case.
-                        psrld.x xmm1, 24; //xmm1 is almost
-                    //argument:=xmm1, _mm_set1_epi32(msf_gif_alpha_threshold)
-                    }
-
-
-                    //brs := _mm_set1_epi32(msf_gif_alpha_threshold)
-                     broadcast_to_brs(alpha_threshold);
-                    #asm AVX, AVX2  {
-                    //pcmpgtd
-                    //argument:=xmm1, brs
-                        pcmpgtd.x xmm1, brs;  //xmm1  is invAlphaMask
-
-                    }
-
-                    #asm AVX, AVX2  {
-                            mov regular, paletteSize;
-                            sub regular, 1;
-                    }
-                    //brs := _mm_set1_epi32(paletteSize - 1)
-                     broadcast_to_brs_regular_already_filled();
+                //p === invAlphaMask = _mm_cmplt_epi32(_mm_srli_epi32(p, 24), _mm_set1_epi32(alpha_threshold));
+                #asm AVX, AVX2  {
+                    // movdqa.x xmm1:, p; //we copy the pixel, just in case.
+                    psrld.x p, 24; //we will not use p again
+                }
+                broadcast_to_brs(alpha_threshold_ptr);
+                #asm AVX, AVX2  {
+                //h**ly fucking nutsacks batman:
+                    //1) _mm_cmpgt_epi32
+                    //2) _mm_cmplt_epi32
+                    //1)pcmpgtd: Compare packed signed 32-bit integers in a and b for greater-than, and store the results in dst.
+                    //2)pcmpgtd: Compare packed signed 32-bit integers in a and b for less-than, and store the results in dst. Note: This intrinsic emits the pcmpgtd instruction with the order of the operands switched.
+                    pcmpgtd.x brs, p;
+                    movdqa.x p, brs;
+                }
+                //---
 
 
-                    #asm AVX, AVX2  {
-                      //out = _mm_or_si128(_mm_and_si128(invAlphaMask, _mm_set1_epi32(paletteSize - 1)), _mm_andnot_si128(invAlphaMask, out));
-                      //out = _mm_or_si128(_mm_and_si128(xmm1, brs), _mm_andnot_si128(xmm1, out));
-                    //out = _mm_or_si128(argument);
-                    //argument := _mm_and_si128(xmm1, brs), _mm_andnot_si128(xmm1, out));
-                    //xmm5 is out
-                        movdqa.x xmm6, brs; //copy brs
-                    }
-                      broadcast_to_brs(palette_minus_one);
+                broadcast_to_brs(palette_minus_one_ptr);
+
+                #asm AVX, AVX2  {
+                   //lhs
+                       movdqa.x xmm6, p;
+                       pand.x xmm6, brs;
+                   //rhs
+                       pandn.x p, xmm5;
+
+                   por.x xmm6, p;
+
+                   movdqa.x xmm5, xmm6;
+                   movdqa.x OUT, xmm5;
+                }
+                //---
 
 
-                     #asm AVX, AVX2  {
-                        // movdqa.x xmm6, xmm1;
-                        //xmm6 is saved brs ===_mm_set1_epi32(paletteSize - 1)
+                #asm AVX, AVX2 {
 
-                        // and actual brs is palette_minus_one
-                        pand.x xmm6, brs; //_mm_and_si128(invAlphaMask, _mm_set1_epi32(paletteSize - 1)
-                        pandn.x xmm1, xmm5;  //_mm_andnot_si128(invAlphaMask, out)  === invAlphaMask(xmm1) , out(xmm5)
-                        //now out = _mm_or_si128(argument); === _mm_or_si128(xmm6, xmm1);
-
-
-                        //out = _mm_or_si128(_mm_and_si128(invAlphaMask, _mm_set1_epi32(paletteSize - 1)), _mm_andnot_si128(invAlphaMask, out));
-
-                        por.x xmm6, xmm1;  // xmm7 = xmm7 OR xmm1 //Compute the bitwise OR of 128 bits (representing integer data) in a and b, and store the result in dst.
-                        //out === xmm6;
-
-                        movdqa.x xmm5, xmm6;
-                        movdqa.x OUT, xmm5;
-                        // movdqa.x xmm5, xmm7; // then move result to xmm5
-                        // por.x xmm5, xmm7, xmm1; //out(xmm5) = somsom(xmm7) ,  sasa(xmm1) //Compute the bitwise OR of 128 bits (representing integer data) in a and b, and store the result in dst.
-
-
-                     }
-
-                 } //#if 0 or 1
-
-                 #asm AVX, AVX2 {
-
-                    movdqu.x [cooked_ptr], OUT;  // _mm_storeu_si128
-                 }
-                 // x+=4;//by 4? can I do by 8? Im such and idiont! there was a defer above doing ths!!
-                 }
+                   movdqu.x [cooked_ptr], OUT;  // _mm_storeu_si128
+                }
+                // x+=4;//by 4? Im such and idiont! there was a defer above doing ths!!
+             }//while loop closing bracket
            return cast(s32)x;
          }; //end procedure pesky_simd
 
-            broadcast_to_brs :: (scalar_ptr: *u16) #expand {
-                #run log("\n[WARNING]you are broadcasting a u16 into a u32*8 wide slot, so we try to take two u16 slots and interpret them as one u32");
-                #asm AVX, AVX2 {
-                mov  regular, [scalar_ptr];
-                movd brs, regular; //Copy the lower 32-bit integer in a to dst
-                pshufd.x brs, brs, 0; //Shuffle 32-bit integers in a using the control in imm8, and store the results in dst.
-                }
-             }
-             broadcast_to_brs :: (scalar_ptr: *u32) #expand {
-                #asm AVX, AVX2 {
-                mov  regular, [scalar_ptr];
-                movd brs, regular; //Copy the lower 32-bit integer in a to dst
-                pshufd.x brs, brs, 0; //Shuffle 32-bit integers in a using the control in imm8, and store the results in dst.
-                }
-             }
+        broadcast_to_brs :: (scalar_ptr: *u16) #expand {
+            #run log("\n[WARNING]you are broadcasting a u16 into a u32*8 wide slot, so we try to take two u16 slots and interpret them as one u32");
+            #asm AVX, AVX2 {
+            mov  regular, [scalar_ptr];
+            movd brs, regular; //Copy the lower 32-bit integer in a to dst
+            pshufd.x brs, brs, 0; //Shuffle 32-bit integers in a using the control in imm8, and store the results in dst.
+            }
+         }
+         broadcast_to_brs :: (scalar_ptr: *u32) #expand {
+            #asm AVX, AVX2 {
+            mov  regular, [scalar_ptr];
+            movd brs, regular; //Copy the lower 32-bit integer in a to dst
+            pshufd.x brs, brs, 0; //Shuffle 32-bit integers in a using the control in imm8, and store the results in dst.
+            }
+         }
 
              /*
              //
-             //I'm extremely annoyed by this:
+             //just...:
 
                     https://www.youtube.com/watch?v=MOb9SZOdcXk to learn shuffle, maybe video is too long
 
@@ -600,10 +543,16 @@ msf_gif_bgra_flag := 0;
                     fk it, I will learn what it does by experimenting with it.
              */
 
+              zero_extend_to_brs_regular_already_filled :: () #expand {
+                #asm AVX, AVX2 {
+                    movd brs, regular; //Copy the lower 32-bit integer in a to dst
+                    // pshufd.x brs, brs, 0; //the same as broadcast but without shuffling
+                }
+             }
               broadcast_to_brs_regular_already_filled :: () #expand {
                 #asm AVX, AVX2 {
                     movd brs, regular; //Copy the lower 32-bit integer in a to dst
-                    // pshufd.x brs, brs, 0;
+                    pshufd.x brs, brs, 0; //shuffle, the last term determines shuffle strategy
                 }
              }
 
@@ -630,253 +579,75 @@ msf_gif_bgra_flag := 0;
             };
             }
 
-            palette_minus_one := u32.[paletteSize.(u32) - 1, paletteSize.(u32) - 1, paletteSize.(u32) - 1, paletteSize.(u32) - 1].data;
+            palette_minus_one_ptr := u32.[paletteSize.(u32) - 1].data;
 
-            mask_00FF00FF := u32.[0x00FF00FF].data;
-            mask_000000FF := u32.[0x000000FF].data;
-            mask_0000FFFF := u32.[0x0000FFFF].data;
-            mask_00FFFFFF := u32.[0x00FFFFFF].data;
-            mask_FFFFFFFF := u32.[0xFFFFFFFF].data ;
+            mask_00FF00FF_ptr := u32.[0x00FF00FF].data;
+            mask_000000FF_ptr := u32.[0x000000FF].data;
+            mask_0000FFFF_ptr := u32.[0x0000FFFF].data;
 
-            mul_rb := u16.[bmul, rmul].data;
-            mul_g  := u32.[gmul].data;
+            mul_rb_ptr := u16.[bmul, rmul].data;
+            mul_g_ptr  := u32.[gmul].data;
 
             bmask_ptr := u32.[cast(u32)bmask].data ;
             gmask_ptr := u32.[cast(u32)gmask].data;
 
-            alpha_threshold := u32.[cast(u32)msf_gif_alpha_threshold, cast(u32)msf_gif_alpha_threshold,cast(u32) msf_gif_alpha_threshold, cast(u32)msf_gif_alpha_threshold].data;
+            alpha_threshold_ptr := u32.[cast(u32)msf_gif_alpha_threshold].data;
             #asm AVX, AVX2 {
                 k_vec: vec;
                 k2_vec: vec;
                 rbmul_vec: vec;
                 gmul_vec: vec;
                 brs: vec; //for broadcasting
-                regular:gpr; //for broadcasting
+                regular:gpr; //for broadcasting or zero extension or sign extension
                 OUT: vec; //for output and debugging
             }
 
-            broadcast_to_brs(mul_g);
+            broadcast_to_brs(mul_g_ptr);
 
             #asm AVX, AVX2 {
-                // broadcastss.x br, [mul_g];
-                // mov  regular, [mul_g];
-                // movd brs, regular;
-                // pshufd.x brs, brs, 0;
                 movdqa.x gmul_vec, brs; //Load 128-bits of integer data from memory into dst. mem_addr must be aligned on a 16-byte boundary or a general-protection exception may be generated.
             }
 
-            broadcast_to_brs(mul_rb);
+            broadcast_to_brs(mul_rb_ptr);
 
             #asm AVX, AVX2 {
-                // broadcastss.x br, [mul_rb];
-                // mov  regular, [mul_rb];
-                // movd brs, regular;
-                // pshufd.x brs, brs, 0;
-
                 movdqu.x rbmul_vec, brs; //Load 128-bits of integer data from memory into dst. mem_addr does not need to be aligned on any particular boundary.
             }
 
             fill_k_vec_and_k2_vec(k);
-            x = pesky_simd(x.(u32),y.(u32),width.(u32),raw,pitch.(u32),paletteSize.(u32),
-                palette_minus_one,alpha_threshold, cooked
-                    );
+            x = pesky_simd(x.(u32),y.(u32),width.(u32),raw,pitch.(u32),paletteSize.(u32),cooked);
 
 
+            }//end compiler flag #if SHOULD_SIMD or something
 
-cppversion :: #string CPP
-               __m128i k = _mm_loadu_si128((__m128i *) &ditherKernel[(y & 3) * 4]);
-                a1: := _mm_srli_epi32(k, rbits);
-                a2: := _mm_srli_epi32(k, bbits);
-                a3: := _mm_slli_epi32(a2, 16);
-                __m128i k2 = _mm_or_si128(a1, a3);
-
-                // for (; x < width - 3; x += 4) {
-                while x < width - 3 { defer x+=4;
-                    u8 * pixels = &raw[y * pitch + x * 4];
-                    __m128i p = _mm_loadu_si128((__m128i *) pixels);
-                    maskara: _mm_set1_epi32(0x00FF00FF);
-                    __m128i rb = _mm_and_si128(p, maskara);
-                    //111111111111111111111111111111
-                    mule := _mm_set_epi16(bmul, rmul, bmul, rmul, bmul, rmul, bmul, rmul)
-                    __m128i rb1 = _mm_mullo_epi16(rb, mule);
-                    __m128i rb2 = _mm_adds_epu16(rb1, k2);
-                    maskara = _mm_set1_epi32(0x0000FFFF);
-                    rb3 = _mm_and_si128(rb2, maskara)
-                    //22222222222222222222222222222
-                    __m128i r3 = _mm_srli_epi32(rb3, 16 - rbits);
-                    somsom := _mm_srli_epi32(rb2, 32 - rbits - gbits - bbits);
-                    ssasa := _mm_set1_epi32(bmask);
-                    __m128i b3 = _mm_and_si128(somsom, ssasa);
-                    //333333333333333333333333333
-                    maskara = _mm_set1_epi32(0x000000FF);
-                    rere := _mm_srli_epi32(p, 8);
-                    __m128i g = _mm_and_si128(rere, maskara);
-                    //444444444444444444444444444
-                    mule = _mm_set1_epi32(gmul);
-                    __m128i g1 = _mm_mullo_epi16(g, mule);
-                    //55555555555
-                    mule1 = _mm_srli_epi32(k, gbits);
-                    __m128i g2 = _mm_adds_epu16(g1, mule1 );
-                    //666666666666666
-                    mule = _mm_srli_epi32(g2, 16 - rbits - gbits)
-                    maskara = _mm_set1_epi32(gmask)
-                    __m128i g3 = _mm_and_si128(mule, maskara);
-                    //7777777777777777
-                    ohoh :=   _mm_or_si128(r3, g3)
-                    __m128i out = _mm_or_si128(ohoh, b3);
-
-                    //mask in transparency based on threshold
-                    //NOTE: we can theoretically do a sub instead of srli by doing an unsigned compare via bias
-                    //      to maybe save a TINY amount of throughput? but lol who cares maybe I'll do it later -m
-                    almost := _mm_srli_epi32(p, 24);
-                    done := _mm_set1_epi32(msf_gif_alpha_threshold);
-                    __m128i invAlphaMask = _mm_cmplt_epi32(almost, done);
-                    //88888888888888888888888888
-                    done := _mm_set1_epi32(paletteSize - 1);
-                    somsom := _mm_and_si128(invAlphaMask, done))
-                    sasa := _mm_andnot_si128(invAlphaMask, out);
-
-                    out = _mm_or_si128(somsom, sasa);
-                    //FINISHFINSISNFSFNISFSIFINSINFINFSINFINNISF
-                    //FINISHFINSISNFSFNISFSIFINSINFINFSINFINNISF
-                    //TODO: does storing this as a __m128i then reading it back as a u32 violate strict aliasing?
-                    u32 * c = &cooked[y * width + x];
-                    _mm_storeu_si128((__m128i *) c, out);
-
-                    }
-CPP
-
-            //TODO(roufrouf): make this simd in #asm blocks
-            // #if (defined (__SSE2__) || defined (_M_X64) || _M_IX86_FP == 2) && !defined(MSF_GIF_NO_SSE2)
-            //     __m128i k = _mm_loadu_si128((__m128i *) &ditherKernel[(y & 3) * 4]);
-            //     __m128i k2 = _mm_or_si128(_mm_srli_epi32(k, rbits), _mm_slli_epi32(_mm_srli_epi32(k, bbits), 16));
-            //     for (; x < width - 3; x += 4) {
-            //         u8 * pixels = &raw[y * pitch + x * 4];
-            //         __m128i p = _mm_loadu_si128((__m128i *) pixels);
-
-            //         __m128i rb = _mm_and_si128(p, _mm_set1_epi32(0x00FF00FF));
-            //         __m128i rb1 = _mm_mullo_epi16(rb, _mm_set_epi16(bmul, rmul, bmul, rmul, bmul, rmul, bmul, rmul));
-            //         __m128i rb2 = _mm_adds_epu16(rb1, k2);
-            //         __m128i r3 = _mm_srli_epi32(_mm_and_si128(rb2, _mm_set1_epi32(0x0000FFFF)), 16 - rbits);
-            //         __m128i b3 = _mm_and_si128(_mm_srli_epi32(rb2, 32 - rbits - gbits - bbits), _mm_set1_epi32(bmask));
-
-            //         __m128i g = _mm_and_si128(_mm_srli_epi32(p, 8), _mm_set1_epi32(0x000000FF));
-            //         __m128i g1 = _mm_mullo_epi16(g, _mm_set1_epi32(gmul));
-            //         __m128i g2 = _mm_adds_epu16(g1, _mm_srli_epi32(k, gbits));
-            //         __m128i g3 = _mm_and_si128(_mm_srli_epi32(g2, 16 - rbits - gbits), _mm_set1_epi32(gmask));
-
-            //         __m128i out = _mm_or_si128(_mm_or_si128(r3, g3), b3);
-
-            //         //mask in transparency based on threshold
-            //         //NOTE: we can theoretically do a sub instead of srli by doing an unsigned compare via bias
-            //         //      to maybe save a TINY amount of throughput? but lol who cares maybe I'll do it later -m
-            //         __m128i invAlphaMask = _mm_cmplt_epi32(_mm_srli_epi32(p, 24), _mm_set1_epi32(msf_gif_alpha_threshold));
-            //         out = _mm_or_si128(_mm_and_si128(invAlphaMask, _mm_set1_epi32(paletteSize - 1)), _mm_andnot_si128(invAlphaMask, out));
-
-            //         //TODO: does storing this as a __m128i then reading it back as a u32 violate strict aliasing?
-            //         u32 * c = &cooked[y * width + x];
-            //         _mm_storeu_si128((__m128i *) c, out);
-            //     }
-            // #endif
-            }
-            else
-            {
-
-                /* scalar fallback replacing the SSE block (inside y loop) */
-
-                // for (; x < width - 3; x += 4) {
-                    // for (int i = 0; i < 4; ++i) {
-                // x:=0;
-                // while x<width-3 {
-                // defer x += 4;
-
-                //     i:= 0;
-                //     while i<4 {
-                //     defer i += 1;
-
-                //         pixels :*u8= *raw[y * pitch + (x + i) * 4];
-
-                //         /* transparency */
-                //         if (pixels[3] < msf_gif_alpha_threshold) {
-                //             cooked[y * width + x + i] =cast(u32) paletteSize - 1;
-                //             continue;
-                //         }
-
-                //         dx: int = (x + i) & 3;
-                //         k: int = ditherKernel[(y & 3) * 4 + dx];
-
-                //         /* use same math as scalar cleanup (keep min semantics) */
-                //         part_b:int = ( min(65535, pixels[2] * bmul + (k >> bbits))
-                //                        >> (16 - rbits - gbits - bbits) ) & bmask;
-                //         part_g:int = ( min(65535, pixels[1] * gmul + (k >> gbits))
-                //                        >> (16 - rbits - gbits) ) & gmask;
-                //         part_r:int =   min(65535, pixels[0] * rmul + (k >> rbits))
-                //                        >> (16 - rbits);
-
-                //         cooked[y * width + x + i] = cast(u32)(part_b | part_g | part_r);
-                //     }
-                // }
-
-
-            }
             //scalar cleanup loop
             assert(paletteSize >= 0);
             curr_iters := 0;
             MAX_ITERS :: 2048;
-            while x<width {
-            defer x += 1;
-            defer curr_iters += 1;
-            assert(curr_iters < MAX_ITERS,"MAX_ITERS %, width%", x,  width);
+            while x<width
+            {
+                defer x += 1;
+                defer curr_iters += 1;
+                assert(curr_iters < MAX_ITERS,"MAX_ITERS %, width%", x,  width);
                 //uint8_t * p = &raw[y * pitch + x * 4];
                  p : *u8= *raw[y * pitch + x * 4];
 
                 //transparent pixel if alpha is low
-                if (p[3] < msf_gif_alpha_threshold) {
+                if (p[3] < msf_gif_alpha_threshold)
+                {
                     cooked[y * width + x] = cast(u32) (paletteSize - 1);
                     continue;
                 }
 
                 dx:s32 = x & 3;
                 dy:s32 = y & 3;
-                k:s32 =  ptr_ditherKernel[dy * 4 + dx];
+                k:s32 =  ditherKernel_ptr[dy * 4 + dx];
 
 
                 a := (( min(65535, p[2] * cast(s32)bmul + (k >> bbits)) >> (16 - rbits - gbits - bbits))  & bmask );
                 b := (( min(65535, p[1] * cast(s32)gmul + (k >> gbits)) >> (16 - rbits - gbits        ))  & gmask );
                 c := (( min(65535, p[0] * cast(s32)rmul + (k >> rbits)) >> (16 - rbits                ))          );
                 cooked[y * width + x] =cast,trunc(u32) (a | b | c);
-
-            }
-
-            #if 0 //force anti simd
-            {
-            x= 0;
-            while x<width {
-                defer x += 1;
-                defer curr_iters += 1;
-                assert(curr_iters < MAX_ITERS,"MAX_ITERS %, width%", x,  width);
-                    //uint8_t * p = &raw[y * pitch + x * 4];
-                     p : *u8= *raw[y * pitch + x * 4];
-
-                    //transparent pixel if alpha is low
-                    if (p[3] < msf_gif_alpha_threshold) {
-                        cooked[y * width + x] = cast(u32) (paletteSize - 1);
-                        continue;
-                    }
-
-                    dx:int = x & 3;
-                    dy:int = y & 3;
-                    k:int = ditherKernel[dy * 4 + dx];
-
-
-                    a := (( min(65535, p[2] * bmul + (k >> bbits)) >> (16 - rbits - gbits - bbits))  & bmask );
-                    b := (( min(65535, p[1] * gmul + (k >> gbits)) >> (16 - rbits - gbits        ))  & gmask );
-                    c := (( min(65535, p[0] * rmul + (k >> rbits)) >> (16 - rbits                ))          );
-                    cooked[y * width + x] =cast,trunc(u32) (a | b | c);
-
-                }
-
-
 
             }
 
@@ -896,11 +667,14 @@ CPP
             count += used[j];
         }
 
-    if count >= 256 {
-        depth -= 1;
-        if !depth then break;
+        if count >= 256
+        {
+            depth -= 1;
+            if !depth then break;
 
-    }else break;
+        }else{
+            break;
+        }
     }
 
     result := MsfCookedFrame.{ cooked, depth, count, rdepths[depth], gdepths[depth], bdepths[depth] };
@@ -923,8 +697,7 @@ CPP
     //insert new code into block buffer
     idx:int =(( blockBits.*) / 8);
     bit:int =(( blockBits.*) % 8);
-    // if bit != 0
-    // then bit = 3;
+
     (writeHead.*)[idx + 0] |= cast,no_check(u8)( code <<       bit ); //ERROR  Cast bounds check failed.  Number must be in [0, 255]; it was 472.
     (writeHead.*)[idx + 1] |= cast,no_check(u8)( code >> ( 8 - bit));
     (writeHead.*)[idx + 2] |= cast,no_check(u8)( code >> (16 - bit));
@@ -1024,7 +797,7 @@ msf_lzw_reset :: inline (lzw: *MsfStridedList, tableSize: int, stride: int) {
     hasSamePal:int = cast(int) (frame.rbits == previous.rbits && frame.gbits == previous.gbits && frame.bbits == previous.bbits);
     framesCompatible:int = cast(int)( hasSamePal && !hasTransparentPixels);
 
-
+    //I leaved many original C comments, just ignore them.
     //write the Graphics `Control Extension` and `Image Descriptor` blocks
     //NOTE: because __attribute__((__packed__)) is annoyingly compiler-specific, we do this unreadable weirdness
     // char headerBytes[19] = "\x21\xF9\x04\x05\0\0\0\0" "\x2C\0\0\0\0\0\0\0\0\x80";
@@ -1116,6 +889,7 @@ msf_lzw_reset :: inline (lzw: *MsfStridedList, tableSize: int, stride: int) {
 }
 
 
+//I dont care about this
 codetoparse :: #string CPP
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 /// HEADER                                                                                                           ///
